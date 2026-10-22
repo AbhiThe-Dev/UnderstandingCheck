@@ -12,7 +12,8 @@ import {
 import { PgSymbolSearch, WorkspaceStore, ensureDemoWorkspace, openDatabase, type SessionRow } from '@uc/db';
 import { SAMPLE_REPOS, sampleRepoPath, type RepoName } from '@uc/fixtures';
 import { indexDirectory } from '@uc/indexer';
-import { createLlmProviderFromEnv } from '@uc/providers';
+import { RepoAccessError, createLlmProviderFromEnv, createRepoHostFromEnv, type RepoHost } from '@uc/providers';
+import { GitHubSync, issueToFeature, parseIssueRef, refOf } from './github';
 import { ReplayManager } from './replay';
 
 export type AnalyzerMode = 'heuristic' | 'llm';
@@ -21,6 +22,8 @@ export interface ServicesOptions {
   /** PGlite data directory; omit for in-memory (tests). */
   dataDir?: string;
   analyzer?: AnalyzerMode;
+  /** Repository host; defaults to the GitHub App from the environment (null = not configured). */
+  host?: RepoHost | null;
 }
 
 export interface SessionSnapshot {
@@ -40,12 +43,15 @@ export class Services {
   private queues = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<Listener>>();
   readonly replays: ReplayManager;
+  readonly github: GitHubSync | null;
 
   private constructor(
     readonly store: WorkspaceStore,
     readonly analyzerMode: AnalyzerMode,
+    readonly host: RepoHost | null,
   ) {
     this.replays = new ReplayManager(this, (status, message) => new HttpError(status, message));
+    this.github = host ? new GitHubSync(store, host) : null;
   }
 
   static async create(opts: ServicesOptions = {}): Promise<Services> {
@@ -54,7 +60,50 @@ export class Services {
     const requested = opts.analyzer ?? (process.env.ANALYZER === 'llm' ? 'llm' : 'heuristic');
     const mode: AnalyzerMode = requested === 'llm' && createLlmProviderFromEnv() ? 'llm' : 'heuristic';
     if (requested === 'llm' && mode !== 'llm') console.warn('ANALYZER=llm but OPENAI_API_KEY is not set; using the heuristic analyzer.');
-    return new Services(new WorkspaceStore(db, ws.id), mode);
+    let host = opts.host;
+    if (host === undefined) {
+      try {
+        host = createRepoHostFromEnv();
+      } catch (err) {
+        console.warn(`GitHub App not configured: ${(err as Error).message}`);
+        host = null;
+      }
+    }
+    return new Services(new WorkspaceStore(db, ws.id), mode, host);
+  }
+
+  // ---------------- GitHub
+
+  /** Connect a repository the GitHub App can see, then index it in the background. */
+  async connectGitHubRepository(fullName: string) {
+    if (!this.host || !this.github) throw new HttpError(503, 'GitHub App is not configured');
+    const repo = (await this.host.listRepositories()).find((r) => r.fullName.toLowerCase() === fullName.toLowerCase());
+    if (!repo) throw new HttpError(404, `The GitHub App cannot see ${fullName}. Install it on that repository first.`);
+    const row = await this.store.addGitHubRepository({
+      installationId: repo.installationId,
+      githubRepositoryId: repo.id,
+      owner: repo.owner,
+      name: repo.name,
+      defaultBranch: repo.defaultBranch,
+      htmlUrl: repo.htmlUrl,
+    });
+    void this.github.sync(row.id, { force: true }).catch(() => undefined);
+    return row;
+  }
+
+  /** Background sync of every connected GitHub repository (skips revoked ones). */
+  async syncAllGitHub() {
+    if (!this.github) return [];
+    const repos = (await this.store.listRepositories()).filter((r) => r.source === 'github' && r.indexingStatus !== 'revoked' && r.indexingStatus !== 'indexing');
+    const out = [];
+    for (const r of repos) {
+      try {
+        out.push({ id: r.id, ...(await this.github.sync(r.id)) });
+      } catch (err) {
+        out.push({ id: r.id, error: (err as Error).message });
+      }
+    }
+    return out;
   }
 
   // ---------------- repositories
@@ -68,7 +117,11 @@ export class Services {
   async indexRepository(id: string) {
     const repo = await this.store.getRepository(id);
     if (!repo) throw new Error('Repository not found');
-    if (repo.source !== 'sample' || !repo.sampleKey) throw new Error('Only sample repositories can be indexed until the GitHub App is configured');
+    if (repo.source === 'github') {
+      if (!this.github) throw new HttpError(503, 'GitHub App is not configured');
+      return this.github.sync(id, { force: true });
+    }
+    if (!repo.sampleKey) throw new Error('Unknown repository source');
     await this.store.updateRepository(id, { indexingStatus: 'indexing', indexingError: null, indexingProgress: { done: 0, total: 0 } });
     try {
       let last = 0;
@@ -133,16 +186,32 @@ export class Services {
     includeRecords?: boolean;
   }) {
     let priors = input.priorDecisions ?? [];
+    let featureDescription = input.featureDescription ?? null;
+    let githubIssue: SessionRow['githubIssue'] = null;
     if (input.repositoryId) {
       const repo = await this.store.getRepository(input.repositoryId);
       if (!repo) throw new HttpError(404, 'Repository not found');
       if (repo.indexingStatus !== 'ready') throw new HttpError(409, 'Repository is not indexed yet');
       if (input.includeRecords !== false) priors = [...(await this.store.records.priorDecisionsFor(repo.id)), ...priors];
+      // A linked issue supplies the feature description when none was typed. Its text is untrusted.
+      if (input.githubIssueReference && repo.source === 'github' && this.host) {
+        const ref = refOf(repo);
+        const n = parseIssueRef(input.githubIssueReference, ref);
+        if (n === null) throw new HttpError(422, `"${input.githubIssueReference}" is not an issue in ${repo.name}`);
+        try {
+          const f = issueToFeature(await this.host.issue(ref, n));
+          githubIssue = f.snapshot;
+          featureDescription ||= f.featureDescription;
+        } catch (err) {
+          if (err instanceof RepoAccessError) throw new HttpError(404, `Issue #${n} was not found in ${repo.name}, or the app cannot read issues there`);
+          throw err;
+        }
+      }
     }
-    const row = await this.store.createSession({ ...input, analyzer: this.analyzerMode });
+    const row = await this.store.createSession({ ...input, featureDescription, githubIssue, analyzer: this.analyzerMode });
     const deps = await this.depsFor(row);
     const { engine } = await SessionEngine.create(
-      { sessionId: row.id, featureDescription: input.featureDescription ?? undefined, priorDecisions: priors },
+      { sessionId: row.id, featureDescription: featureDescription ?? undefined, priorDecisions: priors },
       deps,
     );
     this.engines.set(row.id, engine);

@@ -63,8 +63,28 @@ function Copilot() {
         <div>
           <h1 className="text-lg font-semibold">{session.title}</h1>
           <p className="text-xs text-[var(--color-muted)]">
-            {repo ? `${repo.name} @ ${shortSha(state.commitSha)}` : 'No repository connected'} · analyzer {session.analyzer}
-            {session.githubIssueReference && ` · ${session.githubIssueReference}`}
+            {repo ? (
+              repo.htmlUrl && !state.commitSha.startsWith('content-') ? (
+                <a href={`${repo.htmlUrl}/tree/${state.commitSha}`} target="_blank" rel="noreferrer" className="hover:underline">
+                  {repo.name} @ {shortSha(state.commitSha)}
+                </a>
+              ) : (
+                `${repo.name} @ ${shortSha(state.commitSha)}`
+              )
+            ) : (
+              'No repository connected'
+            )}{' '}
+            · analyzer {session.analyzer}
+            {session.githubIssue ? (
+              <>
+                {' · '}
+                <a href={session.githubIssue.url} target="_blank" rel="noreferrer" className="text-[var(--color-accent)] hover:underline">
+                  #{session.githubIssue.number} {session.githubIssue.title}
+                </a>
+              </>
+            ) : (
+              session.githubIssueReference && ` · ${session.githubIssueReference}`
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">

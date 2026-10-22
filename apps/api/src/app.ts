@@ -172,12 +172,46 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     return c.json({ ok: true });
   });
 
-  app.get('/api/github/status', (c) =>
-    c.json({
-      configured: Boolean(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY),
-      message: 'GitHub App integration arrives in Phase 3. It will use installation tokens with read-only Contents, Metadata and Issues permissions.',
-    }),
-  );
+  app.get('/api/github/status', async (c) => {
+    if (!services.host) {
+      return c.json({ configured: false, message: 'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH in .env to connect GitHub repositories.' });
+    }
+    try {
+      const app = await services.host.appInfo();
+      return c.json({ configured: true, app, message: `Connected as the GitHub App “${app.slug}” (owner ${app.owner}). It reads code with short-lived, read-only, single-repository tokens.` });
+    } catch (err) {
+      return c.json({ configured: false, error: (err as Error).message, message: 'The GitHub App credentials were rejected. Check the App ID and private key.' });
+    }
+  });
+
+  /** Repositories the GitHub App is installed on, with whether each is connected here. */
+  app.get('/api/github/repositories', async (c) => {
+    if (!services.host) throw new HttpError(503, 'GitHub App is not configured');
+    const [hosted, connected] = await Promise.all([services.host.listRepositories(), services.store.listRepositories()]);
+    return c.json(
+      hosted.map((r) => ({
+        fullName: r.fullName,
+        private: r.private,
+        language: r.language,
+        defaultBranch: r.defaultBranch,
+        htmlUrl: r.htmlUrl,
+        connectedRepositoryId: connected.find((x) => x.githubRepositoryId === String(r.id))?.id ?? null,
+      })),
+    );
+  });
+
+  app.post('/api/repos/github', async (c) => {
+    const { fullName } = await json(c, z.object({ fullName: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'Expected owner/name') }));
+    return c.json(await services.connectGitHubRepository(fullName), 201);
+  });
+
+  /** Check GitHub for new commits now (incremental). */
+  app.post('/api/repos/:id/sync', async (c) => {
+    const repo = await services.store.getRepository(c.req.param('id'));
+    if (!repo) throw new HttpError(404, 'Repository not found');
+    if (repo.source !== 'github' || !services.github) throw new HttpError(422, 'Only GitHub repositories sync');
+    return c.json(await services.github.sync(repo.id));
+  });
 
   // ---------------- sessions
 
@@ -205,7 +239,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     const s = await services.snapshot(c.req.param('id'));
     const repo = s.row.repositoryId ? await services.store.getRepository(s.row.repositoryId) : null;
     const { state: _state, ...session } = s.row;
-    return c.json({ session, repo: repo && { id: repo.id, name: repo.name, indexedCommitSha: repo.indexedCommitSha }, ...view(s) });
+    return c.json({ session, repo: repo && { id: repo.id, name: repo.name, indexedCommitSha: repo.indexedCommitSha, htmlUrl: repo.htmlUrl }, ...view(s) });
   });
 
   /** Mode B — live transcript ingestion: one speaker-labeled segment at a time. */
@@ -305,9 +339,11 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
   app.get('/api/sessions/:id/summary', async (c) => {
     const s = await services.snapshot(c.req.param('id'));
     const summary = buildSummary(s.state);
+    const repo = s.row.repositoryId ? await services.store.getRepository(s.row.repositoryId) : null;
     return c.json({
       summary,
-      markdown: summaryToMarkdown(summary, { commitSha: s.state.commitSha }),
+      repoUrl: repo?.htmlUrl ?? null,
+      markdown: summaryToMarkdown(summary, { commitSha: s.state.commitSha, repoUrl: repo?.htmlUrl ?? undefined }),
       participants: s.state.participants,
       records: await services.store.records.fromSession(s.row.id),
     });
@@ -326,6 +362,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
         ...record,
         label: recordLabel(record),
         repositoryName: repos.find((r) => r.id === record.repositoryId)?.name ?? null,
+        repositoryUrl: repos.find((r) => r.id === record.repositoryId)?.htmlUrl ?? null,
         current,
       })),
     );
@@ -351,7 +388,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     const r = await services.store.records.get(c.req.param('id'));
     if (!r) throw new HttpError(404, 'Requirement not found');
     const repo = r.record.repositoryId ? await services.store.getRepository(r.record.repositoryId) : null;
-    return c.json({ ...r, label: recordLabel(r.record), repositoryName: repo?.name ?? null });
+    return c.json({ ...r, label: recordLabel(r.record), repositoryName: repo?.name ?? null, repositoryUrl: repo?.htmlUrl ?? null });
   });
 
   app.post('/api/requirements/:id/status', async (c) => {

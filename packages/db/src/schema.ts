@@ -6,6 +6,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   real,
   text,
   timestamp,
@@ -53,16 +54,38 @@ export const repositories = pgTable(
     sampleKey: text('sample_key'),
     githubInstallationId: text('github_installation_id'),
     githubRepositoryId: text('github_repository_id'),
+    githubOwner: text('github_owner'),
+    githubName: text('github_name'),
+    /** Web URL used to build links to code at a commit. */
+    htmlUrl: text('html_url'),
     defaultBranch: text('default_branch').notNull().default('main'),
     indexedCommitSha: text('indexed_commit_sha'),
-    indexingStatus: text('indexing_status', { enum: ['pending', 'indexing', 'ready', 'failed'] }).notNull().default('pending'),
+    /** `revoked`: the GitHub App lost access; cached code was deleted. */
+    indexingStatus: text('indexing_status', { enum: ['pending', 'indexing', 'ready', 'failed', 'revoked'] }).notNull().default('pending'),
     indexingError: text('indexing_error'),
     indexingProgress: jsonb('indexing_progress').$type<{ done: number; total: number }>(),
     symbolCount: integer('symbol_count').notNull().default(0),
     indexedAt: timestamp('indexed_at', { withTimezone: true }),
+    lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+    lastSync: jsonb('last_sync').$type<{ mode: 'full' | 'incremental' | 'unchanged'; changed: number; removed: number; fetched: number; files: number; durationMs: number }>(),
     createdAt: createdAt(),
   },
-  (t) => [index('repositories_workspace').on(t.workspaceId)],
+  (t) => [index('repositories_workspace').on(t.workspaceId), uniqueIndex('repositories_workspace_github').on(t.workspaceId, t.githubRepositoryId)],
+);
+
+/**
+ * Source of the indexed files at the latest indexed commit, keyed by git blob SHA. Lets a sync fetch
+ * only files whose blob changed. Deleted with the repository, or when access is revoked.
+ */
+export const repositoryFiles = pgTable(
+  'repository_files',
+  {
+    repositoryId: uuid('repository_id').notNull().references(() => repositories.id, { onDelete: 'cascade' }),
+    path: text('path').notNull(),
+    blobSha: text('blob_sha').notNull(),
+    content: text('content').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.repositoryId, t.path] })],
 );
 
 export const codeSymbols = pgTable(
@@ -113,6 +136,8 @@ export const meetingSessions = pgTable(
     consentConfirmedAt: timestamp('consent_confirmed_at', { withTimezone: true }),
     /** Engine state snapshot (compact structured state, never raw audio). */
     state: jsonb('state'),
+    /** Snapshot of the linked GitHub issue (title, body excerpt, url) taken when the session started. */
+    githubIssue: jsonb('github_issue').$type<{ number: number; title: string; state: string; url: string; bodyExcerpt: string }>(),
     /** When this session's confirmed decisions were written to requirement records (once). */
     recordsPublishedAt: timestamp('records_published_at', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),

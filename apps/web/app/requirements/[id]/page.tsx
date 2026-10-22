@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { wordDiff } from '@uc/core';
+import { CodeLink } from '@/components/CodeLink';
 import { Badge, Button, Card, CardHeader, CardTitle, Input } from '@/components/ui/primitives';
 import { api, type RecordDetail, type RecordVersion } from '@/lib/api';
 
@@ -70,9 +71,7 @@ export default function RequirementDetail() {
               <ul className="mt-1 space-y-0.5 text-xs">
                 {current.codeRefs.map((r) => (
                   <li key={`${r.filePath}:${r.startLine}`}>
-                    <span className="font-mono">
-                      {r.filePath}:{r.startLine}
-                    </span>{' '}
+                    <CodeLink htmlUrl={data.repositoryUrl} r={r} />{' '}
                     <span className="text-[var(--color-muted)]">{r.note}</span>
                   </li>
                 ))}

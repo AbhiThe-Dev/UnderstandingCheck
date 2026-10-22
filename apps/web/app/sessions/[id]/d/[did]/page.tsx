@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useState } from 'react';
 import type { Clarification, Discrepancy, SessionState } from '@uc/core';
+import { CodeLink } from '@/components/CodeLink';
 import { Badge, Button, Card, CardHeader, CardTitle, Empty, Label, Textarea } from '@/components/ui/primitives';
 import { api, type SessionView } from '@/lib/api';
 import { useSession } from '@/lib/useSession';
@@ -67,7 +68,7 @@ export default function ClarificationDetail() {
           <div className="space-y-3 px-4 py-3">
             {d.codeRefs.length === 0 && <p className="text-sm text-[var(--color-muted)]">No code involved.</p>}
             {d.codeRefs.map((r) => (
-              <CodeRef key={`${r.evidenceId}:${r.startLine}`} state={state} r={r} />
+              <CodeRef key={`${r.evidenceId}:${r.startLine}`} state={state} r={r} htmlUrl={data.repo?.htmlUrl} />
             ))}
           </div>
         </Card>
@@ -138,7 +139,7 @@ function latestPositions(d: Discrepancy) {
   return [...m.values()];
 }
 
-function CodeRef({ state, r }: { state: SessionState; r: Discrepancy['codeRefs'][number] }) {
+function CodeRef({ state, r, htmlUrl }: { state: SessionState; r: Discrepancy['codeRefs'][number]; htmlUrl: string | null | undefined }) {
   const ev = state.evidence.find((e) => e.id === r.evidenceId);
   // Show a window around the cited lines rather than the whole symbol.
   const from = ev ? Math.max(ev.startLine, r.startLine - 4) : 0;
@@ -146,10 +147,7 @@ function CodeRef({ state, r }: { state: SessionState; r: Discrepancy['codeRefs']
   return (
     <div>
       <div className="flex items-center justify-between text-xs">
-        <span className="font-mono">
-          {r.filePath}:{r.startLine}
-          {r.endLine !== r.startLine ? `-${r.endLine}` : ''}
-        </span>
+        <CodeLink htmlUrl={htmlUrl} r={r} className="font-mono" />
         <span className="text-[var(--color-muted)]">{r.symbolName}</span>
       </div>
       <p className="mt-0.5 text-xs text-[var(--color-muted)]">{r.note}</p>

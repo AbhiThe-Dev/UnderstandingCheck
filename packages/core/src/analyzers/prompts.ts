@@ -59,7 +59,8 @@ export function renderState(state: SessionState, recentClaims = 10): string {
     .map((d) => `- key=${d.key} [${d.category}/${d.status}] ${d.title}`);
   const decided = state.requirements.filter((r) => r.status === 'confirmed').map((r) => `- ${r.description}`);
   return [
-    `Feature under discussion: ${state.feature.description || '(not stated yet)'}`,
+    // May come from a GitHub issue, so it is fenced like any other untrusted text.
+    `Feature under discussion:\n${fence('untrusted_feature_description', state.feature.description || '(not stated yet)')}`,
     state.focus ? `Existing operation in focus: ${state.focus.symbolName}${state.focus.reversal ? ' (being reversed/undone)' : ''}` : '',
     `Participants: ${state.participants.filter((p) => !p.id.startsWith('prior:')).map((p) => `${p.id}=${p.displayName} (${p.role})`).join(', ')}`,
     `Confirmed decisions (do not re-raise):\n${decided.join('\n') || '- none'}`,

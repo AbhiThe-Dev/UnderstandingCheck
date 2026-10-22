@@ -111,7 +111,10 @@ export default function NewSessionPage() {
         </div>
         <div>
           <Label htmlFor="issue">GitHub issue (optional)</Label>
-          <Input id="issue" value={issue} onChange={(e) => setIssue(e.target.value)} placeholder="org/repo#123" />
+          <Input id="issue" value={issue} onChange={(e) => setIssue(e.target.value)} placeholder="#123 or issue URL" />
+          <p className="mt-1 text-xs text-[var(--color-muted)]">
+            For GitHub repositories, the issue’s title and first paragraph become the change being discussed (unless you typed one above).
+          </p>
         </div>
         {repositoryId && (
           <label className="flex items-start gap-2 text-sm">

@@ -4,18 +4,19 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import type { MeetingSummary, Participant } from '@uc/core';
+import { CodeLink } from '@/components/CodeLink';
 import { Badge, Button, Card, CardHeader, CardTitle, Textarea } from '@/components/ui/primitives';
 import { api, type PublishedRecord } from '@/lib/api';
 
 export default function SummaryPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const [data, setData] = useState<{ summary: MeetingSummary; markdown: string; participants: Participant[]; records: PublishedRecord[] } | null>(null);
+  const [data, setData] = useState<{ summary: MeetingSummary; markdown: string; participants: Participant[]; records: PublishedRecord[]; repoUrl: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    api<{ summary: MeetingSummary; markdown: string; participants: Participant[]; records: PublishedRecord[] }>(`/api/sessions/${id}/summary`).then(setData, (e: Error) => setError(e.message));
+    api<{ summary: MeetingSummary; markdown: string; participants: Participant[]; records: PublishedRecord[]; repoUrl: string | null }>(`/api/sessions/${id}/summary`).then(setData, (e: Error) => setError(e.message));
   }, [id]);
 
   if (error) return <Card className="p-6 text-sm">{error}</Card>;
@@ -100,9 +101,7 @@ export default function SummaryPage() {
           {s.codeRefs.length === 0 && <Muted>None.</Muted>}
           {s.codeRefs.map((r) => (
             <li key={`${r.filePath}:${r.startLine}`}>
-              <span className="font-mono text-xs">
-                {r.filePath}:{r.startLine}
-              </span>{' '}
+              <CodeLink htmlUrl={data.repoUrl} r={r} />{' '}
               <span className="text-[var(--color-muted)]">{r.note}</span>
             </li>
           ))}

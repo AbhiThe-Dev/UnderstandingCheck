@@ -50,13 +50,14 @@ export interface SessionMeta {
   analyzer: string;
   commitSha: string | null;
   consentConfirmedAt: string | null;
+  githubIssue: { number: number; title: string; state: string; url: string; bodyExcerpt: string } | null;
   startedAt: string;
   endedAt: string | null;
 }
 
 export interface SessionResponse extends SessionView {
   session: SessionMeta;
-  repo: { id: string; name: string; indexedCommitSha: string | null } | null;
+  repo: { id: string; name: string; indexedCommitSha: string | null; htmlUrl: string | null } | null;
 }
 
 export interface RepoRow {
@@ -64,7 +65,11 @@ export interface RepoRow {
   name: string;
   source: 'sample' | 'github';
   sampleKey: string | null;
-  indexingStatus: 'pending' | 'indexing' | 'ready' | 'failed';
+  htmlUrl: string | null;
+  defaultBranch: string;
+  lastSyncedAt: string | null;
+  lastSync: { mode: 'full' | 'incremental' | 'unchanged'; changed: number; removed: number; fetched: number; files: number; durationMs: number } | null;
+  indexingStatus: 'pending' | 'indexing' | 'ready' | 'failed' | 'revoked';
   indexingError: string | null;
   indexingProgress: { done: number; total: number } | null;
   indexedCommitSha: string | null;
@@ -121,6 +126,7 @@ export interface RecordRow {
 export interface RecordListItem extends RecordRow {
   label: string;
   repositoryName: string | null;
+  repositoryUrl: string | null;
   current: RecordVersion;
 }
 
@@ -129,6 +135,7 @@ export interface RecordDetail {
   versions: RecordVersion[];
   label: string;
   repositoryName: string | null;
+  repositoryUrl: string | null;
 }
 
 export interface PublishedRecord {

@@ -2,7 +2,7 @@
 
 A meeting copilot for software teams that catches **misunderstandings before they become code**. It indexes a repository, follows a speaker-labeled discussion, and privately suggests a clarification only when participants may expect *different behavior* — backed by quotes from the conversation and line-level references into the code. It is designed to stay silent when there is nothing consequential to say, and never to invent a disagreement.
 
-> **Status: Phases 1 (context-aware demo), 2 (live transcript pipeline) and 5 (requirement records, without GitHub export) complete.** Phase 3 (GitHub App) was deferred; Phase 4 needs credentials. See the plan at the end.
+> **Status: Phases 1 (context-aware demo), 2 (live transcript pipeline), 3 (GitHub App integration) and 5 (requirement records, without GitHub export) complete.** Phase 4 (meeting capture) needs OpenAI and Recall.ai credentials. See the plan at the end.
 
 ## Quick start
 
@@ -57,6 +57,20 @@ Per-meeting metrics, from spec §12, are shown live on the session page and per 
 - **Pipeline:** ingest latency (p50/p95/max), analyses run vs. skipped, retrieval cache hits.
 - **Economics:** cost per meeting hour, per suggestion, per useful suggestion, and per confirmed misunderstanding.
 
+### GitHub repositories
+
+Create a GitHub App (read-only **Contents**, **Metadata**, **Issues**, **Pull requests**; webhooks off), install it on the repositories you want analyzed, and put `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` in `.env` (see `.env.example`). Then use **Repositories → Connect GitHub**.
+
+- **Read-only, least privilege.** Every request uses an installation token narrowed to **one repository** and **read-only** permissions. Tokens are minted on demand, kept in memory until shortly before they expire, and never stored. Nothing in the integration can write to GitHub.
+- **First index:** a shallow fetch of one commit into a private temporary directory (`0700`), deleted afterwards. The token is passed to git through environment-provided config, never in the URL, `.git/config` or the process arguments.
+- **Incremental sync:** every `GITHUB_SYNC_INTERVAL_MINUTES` (default 5), or on **Sync now**. The current file tree's git blob SHAs are compared with the cached ones, and only changed files are downloaded. The repository is re-parsed from the cache, which is fast compared with fetching.
+- **Pinned sessions:** sessions keep reading the commit they started on. Its symbols are kept until the session ends, so citations stay valid after new pushes.
+- **Linked issues:** a session can link an issue (`#12`, `owner/repo#12` or the issue URL). Its title and first paragraph become the feature description, and the text is treated as untrusted in model prompts.
+- **Code links:** code references link to GitHub at the exact commit (`…/blob/<sha>/path#L22`) in suggestions, summaries, exports and requirement records.
+- **Revocation:** if the app is uninstalled or the repository is removed from it, the next sync marks the repository *access revoked* and deletes its cached files and index. **Disconnect** does the same on demand.
+
+Endpoints: `GET /api/github/status`, `GET /api/github/repositories`, `POST /api/repos/github {fullName}`, `POST /api/repos/:id/sync`.
+
 ### Requirement records
 
 When a session ends, its **confirmed** decisions become workspace-level records (`REQ-1`, `REQ-2`, …). Proposals that were never confirmed are not recorded.
@@ -82,7 +96,8 @@ Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requ
 | `UC_MODEL_PRICES_JSON` | built-in table | Override per-model prices used for cost estimates, e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}` |
 | `UC_DATA_DIR` | `.data/pglite` | Embedded Postgres data directory; `:memory:` for a throwaway database |
 | `API_PORT`, `WEB_ORIGIN`, `NEXT_PUBLIC_API_URL` | 4000, `http://localhost:3000`, `http://127.0.0.1:4000` | Wiring between web and API |
-| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | — | **Not provided.** Reserved for Phase 3 |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` | — | GitHub App credentials (`GITHUB_APP_PRIVATE_KEY` inline also works). Loaded from `.env` |
+| `GITHUB_SYNC_INTERVAL_MINUTES` | `5` | How often connected repositories are checked for new commits; `0` disables |
 
 ## Architecture
 
@@ -133,6 +148,6 @@ Read these numbers with care: the fixtures were written by the same author as th
 
 - **Phase 1 – context-aware demo** — done (this repository).
 - **Phase 2 – live transcript simulation** — done: server-side replay jobs with pause/step/speed, idempotent ingestion, per-meeting quality/friction/latency/cost metrics, usefulness feedback, and a 400-turn soak test. Not measured: whether a suggestion actually interrupted a real conversation (needs real meetings).
-- **Phase 3 – GitHub App** — *deferred.* Installation-token auth with read-only Contents/Metadata/Issues, repository picker, shallow clone + incremental reindex by commit, code links, issue context, revocation, hosted Postgres/Supabase adapter, sign-in.
+- **Phase 3 – GitHub App** — done: installation-token auth (single-repo, read-only), repository selection, shallow clone plus incremental blob-diff sync, pinned commits for active sessions, code links, linked-issue context, revocation handling. Not done: multi-user sign-in, a hosted Postgres/Supabase adapter, webhooks (polling instead).
 - **Phase 4 – meeting capture** — Electron companion with a `TranscriptSource` for OpenAI real-time transcription and Recall.ai’s Desktop SDK; consent UI; no spoken interruptions.
 - **Phase 5 – requirement records** — done without GitHub: versioned cross-session records, supersede/reaffirm, retire, history with diffs, local Markdown/JSON export, redaction on session deletion. Remaining (needs Phase 3): creating GitHub issues, linking records to pull requests, PR deviation analysis.

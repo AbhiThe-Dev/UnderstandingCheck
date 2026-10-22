@@ -12,3 +12,7 @@ test-results/
 playwright-report/
 next-env.d.ts
 *.tsbuildinfo
+
+# Private keys and certificates (GitHub App keys live in ~/.config/understanding-check/)
+*.pem
+*.key

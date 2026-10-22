@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lt, sql, sum } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, notInArray, sql, sum } from 'drizzle-orm';
 import type { CodeSymbol, Segment, SessionState, UsageRecord, UsageSink } from '@uc/core';
 import type { Db } from './client';
 import {
@@ -9,6 +9,7 @@ import {
   meetingSessions,
   participants,
   repositories,
+  repositoryFiles,
   requirements,
   transcriptSegments,
   users,
@@ -89,11 +90,18 @@ export class WorkspaceStore {
       .where(and(eq(repositories.id, id), eq(repositories.workspaceId, this.workspaceId)));
   }
 
-  /** Replace the index for a repository with symbols at a new commit (old commits are dropped). */
-  async replaceSymbols(repositoryId: string, commitSha: string, symbols: CodeSymbol[]) {
+  /**
+   * Replace the index for a repository with symbols at a new commit. Symbols for older commits are
+   * dropped, except commits in `keepCommits` (still used by active sessions, whose citations must
+   * keep resolving at the commit they started on).
+   */
+  async replaceSymbols(repositoryId: string, commitSha: string, symbols: CodeSymbol[], keepCommits: string[] = []) {
     if (!(await this.getRepository(repositoryId))) throw new Error('Repository not found');
+    const keep = [...new Set(keepCommits.filter((c) => c !== commitSha))];
     await this.db.transaction(async (tx) => {
-      await tx.delete(codeSymbols).where(eq(codeSymbols.repositoryId, repositoryId));
+      await tx
+        .delete(codeSymbols)
+        .where(and(eq(codeSymbols.repositoryId, repositoryId), keep.length ? notInArray(codeSymbols.commitSha, keep) : undefined));
       for (let i = 0; i < symbols.length; i += 200) {
         await tx.insert(codeSymbols).values(
           symbols.slice(i, i + 200).map((s) => ({
@@ -123,6 +131,65 @@ export class WorkspaceStore {
     });
   }
 
+  /** Connect (or reconnect) a GitHub repository. One row per GitHub repository per workspace. */
+  async addGitHubRepository(r: { installationId: number; githubRepositoryId: number; owner: string; name: string; defaultBranch: string; htmlUrl: string }) {
+    const values = {
+      workspaceId: this.workspaceId,
+      source: 'github' as const,
+      name: `${r.owner}/${r.name}`,
+      githubInstallationId: String(r.installationId),
+      githubRepositoryId: String(r.githubRepositoryId),
+      githubOwner: r.owner,
+      githubName: r.name,
+      defaultBranch: r.defaultBranch,
+      htmlUrl: r.htmlUrl,
+    };
+    const [existing] = await this.db
+      .select()
+      .from(repositories)
+      .where(and(eq(repositories.workspaceId, this.workspaceId), eq(repositories.githubRepositoryId, values.githubRepositoryId)));
+    if (existing) {
+      const [row] = await this.db.update(repositories).set(values).where(eq(repositories.id, existing.id)).returning();
+      return row!;
+    }
+    const [row] = await this.db.insert(repositories).values(values).returning();
+    return row!;
+  }
+
+  async repositoryFiles(repositoryId: string) {
+    if (!(await this.getRepository(repositoryId))) return [];
+    return this.db.select().from(repositoryFiles).where(eq(repositoryFiles.repositoryId, repositoryId));
+  }
+
+  /** Store the indexed files for the latest commit (replacing the previous set). */
+  async replaceRepositoryFiles(repositoryId: string, files: { path: string; blobSha: string; content: string }[]) {
+    if (!(await this.getRepository(repositoryId))) throw new Error('Repository not found');
+    await this.db.transaction(async (tx) => {
+      await tx.delete(repositoryFiles).where(eq(repositoryFiles.repositoryId, repositoryId));
+      for (let i = 0; i < files.length; i += 200) {
+        await tx.insert(repositoryFiles).values(files.slice(i, i + 200).map((f) => ({ repositoryId, ...f })));
+      }
+    });
+  }
+
+  /** Delete all cached source and symbols for a repository (e.g. access was revoked). */
+  async purgeRepositoryCode(repositoryId: string) {
+    if (!(await this.getRepository(repositoryId))) return;
+    await this.db.transaction(async (tx) => {
+      await tx.delete(repositoryFiles).where(eq(repositoryFiles.repositoryId, repositoryId));
+      await tx.delete(codeSymbols).where(eq(codeSymbols.repositoryId, repositoryId));
+    });
+  }
+
+  /** Commits that active (not ended) sessions on this repository are pinned to. */
+  async activeSessionCommits(repositoryId: string): Promise<string[]> {
+    const rows = await this.db
+      .selectDistinct({ sha: meetingSessions.commitSha })
+      .from(meetingSessions)
+      .where(and(eq(meetingSessions.workspaceId, this.workspaceId), eq(meetingSessions.repositoryId, repositoryId), eq(meetingSessions.status, 'active')));
+    return rows.map((r) => r.sha).filter((s): s is string => Boolean(s));
+  }
+
   async deleteRepository(id: string) {
     await this.db.delete(repositories).where(and(eq(repositories.id, id), eq(repositories.workspaceId, this.workspaceId)));
   }
@@ -134,6 +201,7 @@ export class WorkspaceStore {
     repositoryId: string | null;
     featureDescription?: string | null;
     githubIssueReference?: string | null;
+    githubIssue?: SessionRow['githubIssue'];
     analyzer: string;
     consentConfirmed: boolean;
   }): Promise<SessionRow> {
@@ -146,6 +214,7 @@ export class WorkspaceStore {
         title: input.title,
         featureDescription: input.featureDescription ?? null,
         githubIssueReference: input.githubIssueReference ?? null,
+        githubIssue: input.githubIssue ?? null,
         analyzer: input.analyzer,
         consentConfirmedAt: input.consentConfirmed ? new Date() : null,
       })

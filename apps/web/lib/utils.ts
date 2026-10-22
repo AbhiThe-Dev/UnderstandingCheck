@@ -35,6 +35,13 @@ export const ROLE_LABEL: Record<string, string> = {
   unknown: 'Role unknown',
 };
 
+/** Link to code on GitHub at the exact commit a reference was made against. */
+export function codeUrl(htmlUrl: string | null | undefined, ref: { filePath: string; startLine: number; endLine: number; commitSha: string }) {
+  if (!htmlUrl || ref.commitSha.startsWith('content-')) return null;
+  const lines = ref.endLine > ref.startLine ? `L${ref.startLine}-L${ref.endLine}` : `L${ref.startLine}`;
+  return `${htmlUrl}/blob/${ref.commitSha}/${ref.filePath}#${lines}`;
+}
+
 export function shortSha(sha: string | null | undefined) {
   if (!sha) return '—';
   return sha.startsWith('content-') ? sha.slice(0, 18) : sha.slice(0, 10);
