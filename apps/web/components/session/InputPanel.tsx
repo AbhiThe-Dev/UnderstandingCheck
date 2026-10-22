@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { parseTranscript, type TranscriptSegmentInput } from '@uc/core';
 import { Badge, Button, Input, Textarea } from '@/components/ui/primitives';
-import { API_URL, api, type ReplayInfo, type Samples } from '@/lib/api';
+import { API_URL, api, type CaptureConfig, type CaptureInfo, type ReplayInfo, type Samples } from '@/lib/api';
+import { MicCapture } from './MicCapture';
 import { cn } from '@/lib/utils';
 
 type Send = (seg: TranscriptSegmentInput) => Promise<void>;
@@ -16,6 +17,8 @@ interface Props {
   speakers: string[];
   disabled: boolean;
   replay: ReplayInfo | null;
+  capture: CaptureInfo | null;
+  captureConfig: CaptureConfig | null;
 }
 
 /**
@@ -23,17 +26,21 @@ interface Props {
  * the same streaming endpoint an external transcription source would use).
  */
 export function InputPanel(props: Props) {
-  const [tab, setTab] = useState<'replay' | 'live'>('replay');
+  const [tab, setTab] = useState<'replay' | 'live' | 'mic'>('replay');
   return (
     <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]">
       <div className="flex border-b border-[var(--color-line)] text-sm">
-        {(['replay', 'live'] as const).map((t) => (
+        {(['replay', 'live', 'mic'] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={cn('px-4 py-2', tab === t ? 'border-b-2 border-[var(--color-accent)] font-medium' : 'text-[var(--color-muted)]')}>
-            {t === 'replay' ? 'Replay transcript' : 'Live input'}
+            {t === 'replay' ? 'Replay transcript' : t === 'live' ? 'Live input' : 'Microphone'}
           </button>
         ))}
       </div>
-      {tab === 'replay' ? <Replay {...props} /> : <Live {...props} />}
+      {tab === 'replay' && <Replay {...props} />}
+      {tab === 'live' && <Live {...props} />}
+      {tab === 'mic' && (
+        <MicCapture sessionId={props.sessionId} speakers={props.speakers} capture={props.capture} configured={Boolean(props.captureConfig?.microphone.configured)} disabled={props.disabled} />
+      )}
     </div>
   );
 }

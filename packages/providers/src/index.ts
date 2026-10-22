@@ -39,3 +39,5 @@ export function createRepoHostFromEnv(env: NodeJS.ProcessEnv = process.env): Rep
   if (!privateKey) return null;
   return new GitHubAppHost({ appId: env.GITHUB_APP_ID, privateKey });
 }
+export { RECALL_REGIONS, RecallClient, createRecallClientFromEnv, parseRecallTranscript, recallSegment, type RecallRegion, type RecallTranscript, type RecallUpload } from './recall';
+export { LIVE_SAMPLE_RATE, OpenAiLiveTranscriber, type LiveTranscriber, type LiveTranscriberEvents, type OpenAiLiveOptions } from './liveTranscribe';

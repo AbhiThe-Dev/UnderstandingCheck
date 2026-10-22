@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <title>Understanding Check — capture</title>
+    <style>
+      :root { color-scheme: light dark; --line: #e3e6eb; --muted: #5d6470; --accent: #4f46e5; --bg: #f6f7f9; --card: #fff; --red: #c0262d; }
+      @media (prefers-color-scheme: dark) { :root { --line: #2a2e36; --muted: #9aa1ad; --accent: #8b85ff; --bg: #0e0f12; --card: #16181d; } }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 14px; font: 13px/1.45 system-ui, -apple-system, sans-serif; background: var(--bg); }
+      h1 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+      section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+      h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 6px; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 4px 0; }
+      button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--card); padding: 4px 10px; cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.danger { border-color: var(--red); color: var(--red); }
+      button:disabled { opacity: .5; cursor: default; }
+      select, input[type=text] { font: inherit; width: 100%; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: inherit; }
+      .rec { display: inline-flex; align-items: center; gap: 5px; color: var(--red); font-weight: 600; }
+      .rec::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--red); animation: pulse 1.2s infinite; }
+      @keyframes pulse { 50% { opacity: .3; } }
+      .err { color: var(--red); font-size: 12px; }
+      label.meeting { display: block; padding: 4px 0; }
+      #log { max-height: 110px; overflow: auto; font: 11px ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Understanding Check <span id="recBadge"></span></h1>
+
+    <section>
+      <h2>Status</h2>
+      <div id="status"></div>
+      <div id="permissions"></div>
+    </section>
+
+    <section>
+      <h2>1 · Meeting</h2>
+      <div id="meetings" class="muted">Waiting for Zoom, Google Meet or Microsoft Teams…</div>
+    </section>
+
+    <section>
+      <h2>2 · Session</h2>
+      <select id="session"></select>
+      <div id="newSession" style="display:none;margin-top:6px">
+        <input type="text" id="title" placeholder="Session title" />
+        <select id="repo" style="margin-top:6px"></select>
+      </div>
+    </section>
+
+    <section>
+      <h2>3 · Record</h2>
+      <label style="display:flex;gap:6px;align-items:flex-start"><input type="checkbox" id="consent" /> <span>Everyone in this meeting knows it is being recorded and transcribed for analysis.</span></label>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="start">Start capture</button>
+        <button class="danger" id="stop" style="display:none">Stop capture</button>
+        <button id="panel" style="display:none">Open suggestions</button>
+      </div>
+      <div id="recInfo" class="muted"></div>
+      <div id="startError" class="err"></div>
+    </section>
+
+    <section>
+      <h2>Activity</h2>
+      <div id="forwarding" class="muted"></div>
+      <div id="log"></div>
+    </section>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

@@ -7,7 +7,7 @@ import type { TranscriptSegmentInput } from '@uc/core';
 import { InputPanel } from '@/components/session/InputPanel';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
 import { Badge, Button, Card, CardHeader, CardTitle, Empty } from '@/components/ui/primitives';
-import { api, type Samples, type SessionView } from '@/lib/api';
+import { api, type CaptureConfig, type Samples, type SessionView } from '@/lib/api';
 import { useSession } from '@/lib/useSession';
 import { ROLE_LABEL, formatTime, shortSha } from '@/lib/utils';
 
@@ -25,11 +25,13 @@ function Copilot() {
   const router = useRouter();
   const { data, error, connected, apply } = useSession(id);
   const [samples, setSamples] = useState<Samples | null>(null);
+  const [captureConfig, setCaptureConfig] = useState<CaptureConfig | null>(null);
   const [showQueued, setShowQueued] = useState(false);
   const transcriptEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api<Samples>('/api/samples').then(setSamples, () => undefined);
+    api<CaptureConfig>('/api/capture/config').then(setCaptureConfig, () => undefined);
   }, []);
   useEffect(() => {
     transcriptEnd.current?.scrollIntoView({ block: 'nearest' });
@@ -88,11 +90,20 @@ function Copilot() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {ended ? (
+          {data.capture?.status === 'live' ? (
+            <Badge tone="red" title="Live capture is running; participants confirmed consent" data-testid="capture-status">
+              <span className="inline-block size-1.5 animate-pulse rounded-full bg-current" aria-hidden />{' '}
+              {data.capture.source === 'recall' ? `Recording ${data.capture.meeting?.title ? `“${data.capture.meeting.title}”` : 'meeting'} via Recall.ai` : `Microphone live · ${data.capture.speaker ?? 'Room'}`}
+            </Badge>
+          ) : data.capture?.status === 'error' ? (
+            <Badge tone="red" title={data.capture.error ?? ''}>
+              Capture stopped: {data.capture.error?.slice(0, 60)}
+            </Badge>
+          ) : ended ? (
             <Badge>Transcription stopped</Badge>
           ) : (
-            <Badge tone="red" title="Participants confirmed they know the discussion is transcribed and analyzed">
-              <span className="inline-block size-1.5 animate-pulse rounded-full bg-current" aria-hidden /> Transcribing · consent confirmed
+            <Badge tone="neutral" title="Participants confirmed they know the discussion is transcribed and analyzed">
+              Not recording · consent confirmed
             </Badge>
           )}
           <Badge tone={connected ? 'green' : 'neutral'}>{connected ? 'live' : 'offline'}</Badge>
@@ -128,6 +139,11 @@ function Copilot() {
                   </div>
                 );
               })}
+              {data.capture?.status === 'live' && data.capture.partial && (
+                <div className="py-1.5 text-sm italic text-[var(--color-muted)]" data-testid="partial-caption">
+                  <span className="font-medium">{data.capture.partial.speaker}</span> · {data.capture.partial.text}…
+                </div>
+              )}
               <div ref={transcriptEnd} />
             </div>
           </Card>
@@ -140,6 +156,8 @@ function Copilot() {
               speakers={state.participants.filter((p) => !p.id.startsWith('prior:')).map((p) => p.displayName)}
               disabled={ended}
               replay={data.replay}
+              capture={data.capture}
+              captureConfig={captureConfig}
             />
           )}
         </section>

@@ -32,11 +32,32 @@ export interface ReplayInfo {
   error: string | null;
 }
 
+export interface CaptureInfo {
+  source: 'recall' | 'microphone';
+  status: 'live' | 'stopped' | 'error';
+  startedAt: string;
+  stoppedAt: string | null;
+  segments: number;
+  duplicates: number;
+  partial: { speaker: string; text: string } | null;
+  speaker: string | null;
+  meeting: { title?: string; platform?: string } | null;
+  error: string | null;
+  audioSeconds: number;
+  model: string | null;
+}
+
+export interface CaptureConfig {
+  recall: { configured: boolean; region?: string; apiUrl?: string };
+  microphone: { configured: boolean; model?: string };
+}
+
 export interface SessionView {
   state: SessionState;
   segments: Segment[];
   status: 'active' | 'ended';
   replay: ReplayInfo | null;
+  capture: CaptureInfo | null;
   metrics: SessionMetrics;
 }
 

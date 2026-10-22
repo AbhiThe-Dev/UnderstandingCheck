@@ -119,6 +119,25 @@ export function pricesFrom(json: string | undefined): Record<string, ModelPrice>
   }
 }
 
+/**
+ * Per-minute prices for streaming transcription, for *estimates*. The gpt-live-transcribe figure
+ * comes from press reports at launch, not OpenAI's price page; override with
+ * `UC_TRANSCRIPTION_PRICES_JSON` (e.g. `{"gpt-live-transcribe":0.017}`).
+ */
+export const DEFAULT_TRANSCRIPTION_PRICES_PER_MINUTE: Record<string, number> = {
+  'gpt-live-transcribe': 0.017,
+};
+
+export function transcriptionPricesFrom(json: string | undefined): Record<string, number> {
+  if (!json) return DEFAULT_TRANSCRIPTION_PRICES_PER_MINUTE;
+  try {
+    const parsed = JSON.parse(json) as Record<string, number>;
+    return { ...DEFAULT_TRANSCRIPTION_PRICES_PER_MINUTE, ...Object.fromEntries(Object.entries(parsed).filter(([, v]) => Number.isFinite(v))) };
+  } catch {
+    return DEFAULT_TRANSCRIPTION_PRICES_PER_MINUTE;
+  }
+}
+
 export function estimateCostUsd(
   model: string,
   inputTokens: number,

@@ -12,7 +12,17 @@ import {
 import { PgSymbolSearch, WorkspaceStore, ensureDemoWorkspace, openDatabase, type SessionRow } from '@uc/db';
 import { SAMPLE_REPOS, sampleRepoPath, type RepoName } from '@uc/fixtures';
 import { indexDirectory } from '@uc/indexer';
-import { RepoAccessError, createLlmProviderFromEnv, createRepoHostFromEnv, type RepoHost } from '@uc/providers';
+import {
+  OpenAiLiveTranscriber,
+  RepoAccessError,
+  createLlmProviderFromEnv,
+  createRecallClientFromEnv,
+  createRepoHostFromEnv,
+  type LiveTranscriber,
+  type RecallClient,
+  type RepoHost,
+} from '@uc/providers';
+import { CaptureManager } from './capture';
 import { GitHubSync, issueToFeature, parseIssueRef, refOf } from './github';
 import { ReplayManager } from './replay';
 
@@ -24,6 +34,10 @@ export interface ServicesOptions {
   analyzer?: AnalyzerMode;
   /** Repository host; defaults to the GitHub App from the environment (null = not configured). */
   host?: RepoHost | null;
+  /** Recall.ai client for meeting capture; defaults to RECALL_API_KEY/RECALL_REGION. */
+  recall?: RecallClient | null;
+  /** Live transcription for microphone capture; defaults to OpenAI when OPENAI_API_KEY is set. */
+  transcriber?: (() => LiveTranscriber) | null;
 }
 
 export interface SessionSnapshot {
@@ -44,14 +58,17 @@ export class Services {
   private listeners = new Map<string, Set<Listener>>();
   readonly replays: ReplayManager;
   readonly github: GitHubSync | null;
+  readonly capture: CaptureManager;
 
   private constructor(
     readonly store: WorkspaceStore,
     readonly analyzerMode: AnalyzerMode,
     readonly host: RepoHost | null,
+    capture: { recall: RecallClient | null; transcriber: (() => LiveTranscriber) | null },
   ) {
     this.replays = new ReplayManager(this, (status, message) => new HttpError(status, message));
     this.github = host ? new GitHubSync(store, host) : null;
+    this.capture = new CaptureManager(this, capture, (status, message) => new HttpError(status, message));
   }
 
   static async create(opts: ServicesOptions = {}): Promise<Services> {
@@ -69,7 +86,10 @@ export class Services {
         host = null;
       }
     }
-    return new Services(new WorkspaceStore(db, ws.id), mode, host);
+    const recall = opts.recall !== undefined ? opts.recall : createRecallClientFromEnv();
+    const apiKey = process.env.OPENAI_API_KEY;
+    const transcriber = opts.transcriber !== undefined ? opts.transcriber : apiKey ? () => new OpenAiLiveTranscriber({ apiKey }) : null;
+    return new Services(new WorkspaceStore(db, ws.id), mode, host, { recall, transcriber });
   }
 
   // ---------------- GitHub
@@ -269,6 +289,7 @@ export class Services {
 
   async deleteSession(id: string) {
     this.replays.forget(id);
+    this.capture.stop(id);
     await this.store.deleteSession(id);
     this.engines.delete(id);
     this.listeners.delete(id);

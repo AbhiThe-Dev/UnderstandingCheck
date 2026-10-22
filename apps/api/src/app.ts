@@ -1,3 +1,4 @@
+import { createNodeWebSocket } from '@hono/node-ws';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
@@ -77,12 +78,14 @@ function eventSummary(events: EngineEvent[]) {
 
 export function createApp(services: Services, opts: { webOrigin?: string } = {}) {
   const app = new Hono();
+  const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   /** What the UI renders: engine state plus live replay progress and meeting metrics. */
   const view = (s: SessionSnapshot) => ({
     state: s.state,
     segments: s.segments,
     status: s.status,
     replay: services.replays.status(s.state.sessionId),
+    capture: services.capture.status(s.state.sessionId),
     metrics: sessionMetrics(s.state, s.segments),
   });
   const origin = opts.webOrigin ?? process.env.WEB_ORIGIN ?? 'http://localhost:3000';
@@ -278,6 +281,84 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     return c.json(sessionMetrics(s.state, s.segments));
   });
 
+  // ---------------- live meeting capture
+
+  app.get('/api/capture/config', (c) => c.json(services.capture.config()));
+
+  /** Desktop app: create a Recall.ai upload for this session (consent required) and get its token. */
+  app.post('/api/sessions/:id/capture/recall', async (c) => {
+    const body = await json(
+      c,
+      z.object({
+        consentConfirmed: z.literal(true, { error: 'Participants must be told the meeting is recorded and transcribed' }),
+        meeting: z.object({ title: z.string().max(300).optional(), platform: z.string().max(60).optional() }).nullish(),
+      }),
+    );
+    return c.json(await services.capture.startRecall(c.req.param('id'), body.meeting ?? null), 201);
+  });
+
+  /** Desktop app: forward Recall `realtime-event`s (one or a batch). Resends are ignored. */
+  app.post('/api/sessions/:id/capture/recall/events', async (c) => {
+    const Event = z.object({ event: z.string().max(100), data: z.unknown() });
+    const body = await json(c, z.union([Event, z.array(Event).max(200)]));
+    const results = [];
+    for (const evt of Array.isArray(body) ? body : [body]) results.push(await services.capture.recallEvent(c.req.param('id'), evt));
+    return c.json({ results, capture: services.capture.status(c.req.param('id')) });
+  });
+
+  app.post('/api/sessions/:id/capture/stop', async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const error = typeof (body as { error?: unknown }).error === 'string' ? ((body as { error: string }).error.slice(0, 500)) : undefined;
+    return c.json({ capture: services.capture.stop(c.req.param('id'), error) });
+  });
+
+  /**
+   * Microphone capture: binary frames of 24 kHz mono PCM16, JSON control frames
+   * (`commit`, `speaker`, `stop`). Only accepted from the web app's origin, with consent.
+   */
+  app.get(
+    '/api/sessions/:id/audio',
+    // Refuse before upgrading: browsers send Origin on WebSocket handshakes, so other sites can't stream in.
+    async (c, next) => {
+      if (![origin, 'http://127.0.0.1:3000'].includes(c.req.header('origin') ?? '')) return c.json({ error: 'Origin not allowed' }, 403);
+      if (c.req.query('consent') !== '1') return c.json({ error: 'Consent is required before transcribing' }, 403);
+      await next();
+    },
+    upgradeWebSocket((c) => {
+      const id = c.req.param('id')!;
+      const speaker = (c.req.query('speaker') || 'Room').slice(0, 80);
+      let handlers: Awaited<ReturnType<Services['capture']['openMicrophone']>> | null = null;
+      const pending: Buffer[] = [];
+      return {
+        onOpen: async (_evt, ws) => {
+          const send = (m: Record<string, unknown>) => ws.send(JSON.stringify(m));
+          try {
+            handlers = await services.capture.openMicrophone(id, { send, close: () => ws.close(1000, 'stopped') }, speaker);
+            for (const chunk of pending.splice(0)) handlers.onAudio(chunk);
+          } catch (err) {
+            send({ type: 'error', message: (err as Error).message });
+            ws.close(1011, 'unavailable');
+          }
+        },
+        onMessage: (evt) => {
+          const data = evt.data;
+          if (typeof data === 'string') {
+            try {
+              handlers?.onControl(JSON.parse(data));
+            } catch {
+              /* ignore malformed control frames */
+            }
+            return;
+          }
+          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data instanceof ArrayBuffer ? data : (data as unknown as ArrayBuffer));
+          if (handlers) handlers.onAudio(buf);
+          else if (pending.length < 50) pending.push(buf);
+        },
+        onClose: () => handlers?.onClose(),
+      };
+    }),
+  );
+
   app.get('/api/sessions/:id/stream', async (c) => {
     const id = c.req.param('id');
     const initial = await services.snapshot(id);
@@ -329,6 +410,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
 
   app.post('/api/sessions/:id/end', async (c) => {
     services.replays.stop(c.req.param('id'));
+    services.capture.stop(c.req.param('id'));
     const id = c.req.param('id');
     const { snapshot } = await services.run(id, (engine) => engine.finalize(), { ended: true });
     // Confirmed decisions become durable requirement records (once per session).
@@ -455,5 +537,5 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     return c.json({ analyzer: services.analyzerMode, spentUsd: spent, limitUsd: ws.monthlyBudgetUsd, prices: pricesFrom(process.env.UC_MODEL_PRICES_JSON), bySession, byOperation });
   });
 
-  return app;
+  return Object.assign(app, { injectWebSocket });
 }

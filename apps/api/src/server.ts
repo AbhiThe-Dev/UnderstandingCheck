@@ -15,9 +15,13 @@ const port = Number(process.env.API_PORT ?? 4000);
 const services = await Services.create({ dataDir: dataDir === ':memory:' ? undefined : dataDir });
 const app = createApp(services);
 
-serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, () => {
-  console.log(`[api] listening on http://127.0.0.1:${port} · analyzer=${services.analyzerMode} · github=${services.host ? 'app configured' : 'off'} · data=${dataDir}`);
+const server = serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, () => {
+  const cap = services.capture.config();
+  console.log(
+    `[api] listening on http://127.0.0.1:${port} · analyzer=${services.analyzerMode} · github=${services.host ? 'app configured' : 'off'} · recall=${cap.recall.configured ? cap.recall.region : 'off'} · mic=${cap.microphone.configured ? 'on' : 'off'} · data=${dataDir}`,
+  );
 });
+app.injectWebSocket(server);
 
 // Poll connected GitHub repositories for new commits (no webhooks needed on a laptop).
 const syncMinutes = Number(process.env.GITHUB_SYNC_INTERVAL_MINUTES ?? 5);

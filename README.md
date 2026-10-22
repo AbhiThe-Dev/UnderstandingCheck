@@ -2,7 +2,7 @@
 
 A meeting copilot for software teams that catches **misunderstandings before they become code**. It indexes a repository, follows a speaker-labeled discussion, and privately suggests a clarification only when participants may expect *different behavior* — backed by quotes from the conversation and line-level references into the code. It is designed to stay silent when there is nothing consequential to say, and never to invent a disagreement.
 
-> **Status: Phases 1 (context-aware demo), 2 (live transcript pipeline), 3 (GitHub App integration) and 5 (requirement records, without GitHub export) complete.** Phase 4 (meeting capture) needs OpenAI and Recall.ai credentials. See the plan at the end.
+> **Status: all phases built.** Phase 1 (context-aware demo), 2 (live transcript pipeline), 3 (GitHub App), 4 (meeting capture), and 5 (requirement records, without GitHub issue export). Phase 4 still needs a live check in a real call; see "Meeting capture".
 
 ## Quick start
 
@@ -71,6 +71,37 @@ Create a GitHub App (read-only **Contents**, **Metadata**, **Issues**, **Pull re
 
 Endpoints: `GET /api/github/status`, `GET /api/github/repositories`, `POST /api/repos/github {fullName}`, `POST /api/repos/:id/sync`.
 
+### Meeting capture (Phase 4)
+
+Two capture sources feed the same pipeline as replays and the streaming endpoint. Both start only from an explicit action with consent confirmed, show a visible recording indicator, and never speak into the meeting.
+
+| Source | Where | Transcription | Speakers |
+| --- | --- | --- | --- |
+| **Zoom / Google Meet / Microsoft Teams calls** | Desktop app (`apps/desktop`, Electron) with the Recall.ai Desktop SDK. No bot joins the call | Recall.ai's built-in streaming transcription | Named by the meeting platform |
+| **In-person (microphone)** | Web app → **Microphone** tab | OpenAI `gpt-live-transcribe` via the Realtime API, relayed by the API server | Live transcription can't separate voices, so the operator taps the current speaker. Turns are attributed at commit time |
+
+**Desktop app:**
+
+```bash
+pnpm dev                                  # API + web app
+pnpm --filter @uc/desktop dev             # build + launch the Electron companion
+```
+
+- On first launch, macOS asks to allow **Accessibility**, **Screen Recording** and **Microphone** for Electron. Meeting detection needs all three.
+- Join a call. The meeting appears in the control window: choose or create a session, confirm consent, and click **Start capture**.
+- The menu bar shows **● REC**, and the copilot's private suggestions open in a narrow always-on-top panel, hidden from screen shares where macOS allows.
+- **Keys stay on the server.** The Recall API key never reaches the desktop app: the API creates the upload and hands out a short-lived token.
+- **Reliable delivery.** Transcript events are queued and retried while the API is unreachable. They are idempotent, so resends are ignored, and the backlog is capped.
+- **Handled cleanly:** network loss (Recall stops after 2 minutes offline), an unsupported OS (the SDK needs macOS on Apple Silicon or Windows), and a missing or unreachable API.
+
+**Microphone:**
+- The browser converts the mic to 24 kHz PCM16 and detects pauses, because `gpt-live-transcribe` only accepts manually committed turns. The API refuses other origins and connections without consent.
+- Audio isn't stored, only the transcript text.
+- Cost is recorded per minute. `$0.017/min` is the reported launch price, overridable with `UC_TRANSCRIPTION_PRICES_JSON`.
+- The workspace budget is checked before starting, and billing or auth errors stop the stream.
+
+Endpoints: `GET /api/capture/config`, `POST /api/sessions/:id/capture/recall`, `POST /api/sessions/:id/capture/recall/events`, `POST /api/sessions/:id/capture/stop`, `WS /api/sessions/:id/audio`.
+
 ### Requirement records
 
 When a session ends, its **confirmed** decisions become workspace-level records (`REQ-1`, `REQ-2`, …). Proposals that were never confirmed are not recorded.
@@ -98,13 +129,17 @@ Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requ
 | `API_PORT`, `WEB_ORIGIN`, `NEXT_PUBLIC_API_URL` | 4000, `http://localhost:3000`, `http://127.0.0.1:4000` | Wiring between web and API |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` | — | GitHub App credentials (`GITHUB_APP_PRIVATE_KEY` inline also works). Loaded from `.env` |
 | `GITHUB_SYNC_INTERVAL_MINUTES` | `5` | How often connected repositories are checked for new commits; `0` disables |
+| `RECALL_API_KEY`, `RECALL_REGION` | — | Recall.ai Desktop SDK for meeting capture (`us-west-2` = pay-as-you-go) |
+| `UC_TRANSCRIPTION_PRICES_JSON` | built-in | Per-minute transcription price override, e.g. `{"gpt-live-transcribe":0.017}` |
+| `UC_API_URL`, `UC_WEB_URL` | `http://127.0.0.1:4000`, `http://localhost:3000` | Where the desktop app finds the API and web app |
 
 ## Architecture
 
 ```
 apps/web            Next.js 16 + Tailwind (shadcn-style components) — dashboard, repositories, live copilot,
                     clarification detail, meeting summary, cost dashboard
-apps/api            Hono on Node — REST + SSE; owns the database and live session engines
+apps/api            Hono on Node — REST + SSE + WebSocket; owns the database, session engines and capture
+apps/desktop        Electron companion — Recall.ai Desktop SDK meeting capture, private side panel
 packages/core       The clarification engine (pure TypeScript, no I/O): types, modules 1–6, prompts, scoring
 packages/indexer    Tree-sitter (WASM) TS/JS parsing → symbols, calls, side effects; in-memory search
 packages/db         Drizzle schema + migrations on PGlite (embedded Postgres), Postgres full-text search
@@ -149,5 +184,5 @@ Read these numbers with care: the fixtures were written by the same author as th
 - **Phase 1 – context-aware demo** — done (this repository).
 - **Phase 2 – live transcript simulation** — done: server-side replay jobs with pause/step/speed, idempotent ingestion, per-meeting quality/friction/latency/cost metrics, usefulness feedback, and a 400-turn soak test. Not measured: whether a suggestion actually interrupted a real conversation (needs real meetings).
 - **Phase 3 – GitHub App** — done: installation-token auth (single-repo, read-only), repository selection, shallow clone plus incremental blob-diff sync, pinned commits for active sessions, code links, linked-issue context, revocation handling. Not done: multi-user sign-in, a hosted Postgres/Supabase adapter, webhooks (polling instead).
-- **Phase 4 – meeting capture** — Electron companion with a `TranscriptSource` for OpenAI real-time transcription and Recall.ai’s Desktop SDK; consent UI; no spoken interruptions.
+- **Phase 4 – meeting capture** — built: Electron companion with the Recall.ai Desktop SDK (built-in transcription), microphone capture through OpenAI `gpt-live-transcribe`, consent and recording indicators, private side panel, reliable event delivery, per-minute cost tracking. Verified: SDK startup on macOS, Recall API access, every code path against fakes, and the live OpenAI error path. Not yet verified live: a real call, and a successful OpenAI transcription (the account had no credits).
 - **Phase 5 – requirement records** — done without GitHub: versioned cross-session records, supersede/reaffirm, retire, history with diffs, local Markdown/JSON export, redaction on session deletion. Remaining (needs Phase 3): creating GitHub issues, linking records to pull requests, PR deviation analysis.
