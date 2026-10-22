@@ -9,8 +9,11 @@ export async function api<T = unknown>(cfg: ApiConfig, path: string, init: { met
     headers: init.body !== undefined ? { 'content-type': 'application/json' } : undefined,
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok) throw new Error(data.error ?? `${res.status} ${res.statusText}`);
+  const data = (await res.json().catch(() => ({}))) as { error?: string; issues?: string[] };
+  if (!res.ok) {
+    const detail = data.issues?.length ? ` (${data.issues.join('; ')})` : '';
+    throw new Error(`${data.error ?? `${res.status} ${res.statusText}`}${detail}`);
+  }
   return data as T;
 }
 

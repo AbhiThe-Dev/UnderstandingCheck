@@ -48,7 +48,7 @@ describe('Recall transcript events', () => {
     expect((seen!.init.headers as Record<string, string>).authorization).toBe('Token k_test');
     expect(JSON.parse(String(seen!.init.body))).toEqual({
       recording_config: {
-        transcript: { provider: { recallai_streaming: { mode: 'prioritize_low_latency' } } },
+        transcript: { provider: { recallai_streaming: { mode: 'prioritize_low_latency', language_code: 'en' } } },
         realtime_endpoints: [{ type: 'desktop_sdk_callback', events: ['transcript.data', 'transcript.partial_data'] }],
       },
       metadata: { uc_session_id: 's1' },

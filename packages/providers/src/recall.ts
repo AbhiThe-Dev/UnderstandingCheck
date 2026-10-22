@@ -48,7 +48,8 @@ export class RecallClient {
       method: 'POST',
       body: {
         recording_config: {
-          transcript: { provider: { recallai_streaming: { mode: 'prioritize_low_latency' } } },
+          // Low-latency mode only supports English, and Recall rejects the upload unless that is explicit.
+          transcript: { provider: { recallai_streaming: { mode: 'prioritize_low_latency', language_code: 'en' } } },
           realtime_endpoints: [{ type: 'desktop_sdk_callback', events: ['transcript.data', 'transcript.partial_data'] }],
         },
         metadata,

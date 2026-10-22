@@ -291,10 +291,12 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
       c,
       z.object({
         consentConfirmed: z.literal(true, { error: 'Participants must be told the meeting is recorded and transcribed' }),
-        meeting: z.object({ title: z.string().max(300).optional(), platform: z.string().max(60).optional() }).nullish(),
+        // Recall reports a missing title or platform as null (e.g. Google Meet before its title is known).
+        meeting: z.object({ title: z.string().max(300).nullish(), platform: z.string().max(60).nullish() }).nullish(),
       }),
     );
-    return c.json(await services.capture.startRecall(c.req.param('id'), body.meeting ?? null), 201);
+    const m = body.meeting;
+    return c.json(await services.capture.startRecall(c.req.param('id'), m ? { title: m.title ?? undefined, platform: m.platform ?? undefined } : null), 201);
   });
 
   /** Desktop app: forward Recall `realtime-event`s (one or a batch). Resends are ignored. */

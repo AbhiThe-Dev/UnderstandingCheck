@@ -125,6 +125,14 @@ describe('meeting capture through Recall.ai', () => {
     expect((await call('POST', `/api/sessions/${id}/capture/recall/events`, batch[0])).status).toBe(200); // still idempotent after stop
   });
 
+  it('accepts a meeting Recall has not named yet', async () => {
+    const { body } = await call('POST', '/api/demo');
+    const started = await call('POST', `/api/sessions/${body.id}/capture/recall`, { consentConfirmed: true, meeting: { title: null, platform: 'google-meet' } });
+    expect(started.status).toBe(201);
+    expect((await call('GET', `/api/sessions/${body.id}`)).body.capture).toMatchObject({ meeting: { platform: 'google-meet' } });
+    await call('POST', `/api/sessions/${body.id}/capture/stop`);
+  });
+
   it('rejects events for a session that is not capturing', async () => {
     const { body } = await call('POST', '/api/demo');
     expect((await call('POST', `/api/sessions/${body.id}/capture/recall/events`, utterance('A', 'hi there', 1))).status).toBe(409);
