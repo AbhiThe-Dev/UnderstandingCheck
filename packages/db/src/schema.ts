@@ -113,6 +113,8 @@ export const meetingSessions = pgTable(
     consentConfirmedAt: timestamp('consent_confirmed_at', { withTimezone: true }),
     /** Engine state snapshot (compact structured state, never raw audio). */
     state: jsonb('state'),
+    /** When this session's confirmed decisions were written to requirement records (once). */
+    recordsPublishedAt: timestamp('records_published_at', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp('ended_at', { withTimezone: true }),
     createdAt: createdAt(),
@@ -224,4 +226,56 @@ export const aiUsage = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index('ai_usage_workspace_created').on(t.workspaceId, t.createdAt)],
+);
+
+/**
+ * Durable, workspace-level agreed requirements. A record keeps one row per version; versions are
+ * immutable. Reaffirmations (a later meeting confirming the same decision) are logged without a new version.
+ */
+export const requirementRecords = pgTable(
+  'requirement_records',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    repositoryId: uuid('repository_id').references(() => repositories.id, { onDelete: 'set null' }),
+    /** Human-friendly number, shown as REQ-<number>; unique per workspace. */
+    number: integer('number').notNull(),
+    title: text('title').notNull(),
+    status: text('status', { enum: ['active', 'retired'] }).notNull().default('active'),
+    retiredReason: text('retired_reason'),
+    currentVersion: integer('current_version').notNull().default(1),
+    reaffirmations: jsonb('reaffirmations')
+      .$type<{ sessionId: string | null; sessionTitle: string; at: string; confirmedBy: string[] }[]>()
+      .notNull()
+      .default([]),
+    lastConfirmedAt: timestamp('last_confirmed_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: createdAt(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('records_workspace_number').on(t.workspaceId, t.number), index('records_workspace_repo').on(t.workspaceId, t.repositoryId, t.status)],
+);
+
+export const requirementVersions = pgTable(
+  'requirement_versions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    recordId: uuid('record_id').notNull().references(() => requirementRecords.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    description: text('description').notNull(),
+    acceptanceCriteria: jsonb('acceptance_criteria').$type<string[]>().notNull(),
+    codeRefs: jsonb('code_refs').notNull(),
+    /** Quotes and scenario answers with speaker names; emptied if the source session is deleted. */
+    evidence: jsonb('evidence').notNull(),
+    evidenceRedacted: boolean('evidence_redacted').notNull().default(false),
+    confirmedBy: jsonb('confirmed_by').$type<string[]>().notNull(),
+    confirmation: text('confirmation').notNull(),
+    concern: text('concern'),
+    /** How this version came about: a new decision, or one that replaced the previous version. */
+    origin: text('origin', { enum: ['created', 'supersedes'] }).notNull(),
+    revisedInMeeting: boolean('revised_in_meeting').notNull().default(false),
+    sessionId: uuid('session_id').references(() => meetingSessions.id, { onDelete: 'set null' }),
+    sessionTitle: text('session_title').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex('versions_record_version').on(t.recordId, t.version), index('versions_session').on(t.sessionId)],
 );

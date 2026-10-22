@@ -9,11 +9,14 @@ import {
   sessionMetrics,
   buildSummary,
   parseTranscript,
+  recordDrafts,
   summaryToMarkdown,
   type EngineEvent,
   type SessionState,
 } from '@uc/core';
 import { CASES, SAMPLE_REPOS, SEEDED_DEMO, SEEDED_DEMO_RESOLUTION, type RepoName } from '@uc/fixtures';
+import { recordLabel } from '@uc/db';
+import { recordsToMarkdown } from './export';
 import { HttpError, type Services, type SessionSnapshot } from './services';
 
 const SegmentBody = z.object({
@@ -31,6 +34,7 @@ const SessionBody = z.object({
   githubIssueReference: z.string().trim().max(200).nullish(),
   consentConfirmed: z.literal(true, { error: 'Participants must be told the discussion is transcribed and analyzed' }),
   priorDecisions: z.array(z.object({ id: z.string().max(60), description: z.string().max(500), source: z.string().max(100) })).max(20).optional(),
+  includeRecords: z.boolean().optional(),
 });
 
 const ActionBody = z.object({ action: z.enum(['ask_now', 'dismiss', 'save_for_later', 'restore', 'mark_useful', 'mark_not_useful']) });
@@ -108,12 +112,13 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
   // ---------------- overview
 
   app.get('/api/dashboard', async (c) => {
-    const [repos, sessions, counts, spent, ws] = await Promise.all([
+    const [repos, sessions, counts, spent, ws, records] = await Promise.all([
       services.store.listRepositories(),
       services.store.listSessions(10),
       services.store.dashboardCounts(),
       services.store.spentThisMonthUsd(),
       services.store.workspace(),
+      services.store.records.list({ status: 'active' }),
     ]);
     return c.json({
       analyzer: services.analyzerMode,
@@ -125,7 +130,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
           (d) => d.visibility !== 'hidden' && !['resolved', 'dismissed'].includes(d.status),
         ).length,
       })),
-      counts,
+      counts: { ...counts, activeRequirements: records.length },
       budget: { spentUsd: spent, limitUsd: ws.monthlyBudgetUsd },
       settings: { transcriptRetentionDays: ws.transcriptRetentionDays, monthlyBudgetUsd: ws.monthlyBudgetUsd },
     });
@@ -290,14 +295,70 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
 
   app.post('/api/sessions/:id/end', async (c) => {
     services.replays.stop(c.req.param('id'));
-    const { snapshot } = await services.run(c.req.param('id'), (engine) => engine.finalize(), { ended: true });
-    return c.json(view(snapshot));
+    const id = c.req.param('id');
+    const { snapshot } = await services.run(id, (engine) => engine.finalize(), { ended: true });
+    // Confirmed decisions become durable requirement records (once per session).
+    const published = await services.store.records.publishSession(id, recordDrafts(snapshot.state));
+    return c.json({ ...view(snapshot), published });
   });
 
   app.get('/api/sessions/:id/summary', async (c) => {
     const s = await services.snapshot(c.req.param('id'));
     const summary = buildSummary(s.state);
-    return c.json({ summary, markdown: summaryToMarkdown(summary, { commitSha: s.state.commitSha }), participants: s.state.participants });
+    return c.json({
+      summary,
+      markdown: summaryToMarkdown(summary, { commitSha: s.state.commitSha }),
+      participants: s.state.participants,
+      records: await services.store.records.fromSession(s.row.id),
+    });
+  });
+
+  // ---------------- requirement records
+
+  const RecordFilter = z.object({ status: z.enum(['active', 'retired']).optional(), repositoryId: z.string().uuid().optional() });
+
+  app.get('/api/requirements', async (c) => {
+    const filter = RecordFilter.parse({ status: c.req.query('status') || undefined, repositoryId: c.req.query('repositoryId') || undefined });
+    const repos = await services.store.listRepositories();
+    const rows = await services.store.records.list(filter);
+    return c.json(
+      rows.map(({ record, current }) => ({
+        ...record,
+        label: recordLabel(record),
+        repositoryName: repos.find((r) => r.id === record.repositoryId)?.name ?? null,
+        current,
+      })),
+    );
+  });
+
+  /** Local download of records as Markdown or JSON (no external service). */
+  app.get('/api/requirements/export', async (c) => {
+    const format = z.enum(['md', 'json']).parse(c.req.query('format') ?? 'md');
+    const filter = RecordFilter.parse({ status: c.req.query('status') || undefined, repositoryId: c.req.query('repositoryId') || undefined });
+    const rows = await services.store.records.list(filter);
+    const items = (await Promise.all(rows.map((r) => services.store.records.get(r.record.id)))).filter((x): x is NonNullable<typeof x> => x !== null);
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'json') {
+      c.header('content-disposition', `attachment; filename="requirements-${stamp}.json"`);
+      return c.json(items.map(({ record, versions }) => ({ label: recordLabel(record), ...record, versions })));
+    }
+    c.header('content-type', 'text/markdown; charset=utf-8');
+    c.header('content-disposition', `attachment; filename="requirements-${stamp}.md"`);
+    return c.body(recordsToMarkdown(items, { history: c.req.query('history') !== 'false' }));
+  });
+
+  app.get('/api/requirements/:id', async (c) => {
+    const r = await services.store.records.get(c.req.param('id'));
+    if (!r) throw new HttpError(404, 'Requirement not found');
+    const repo = r.record.repositoryId ? await services.store.getRepository(r.record.repositoryId) : null;
+    return c.json({ ...r, label: recordLabel(r.record), repositoryName: repo?.name ?? null });
+  });
+
+  app.post('/api/requirements/:id/status', async (c) => {
+    const body = await json(c, z.object({ status: z.enum(['active', 'retired']), reason: z.string().trim().max(500).optional() }));
+    const r = await services.store.records.setStatus(c.req.param('id'), body.status, body.reason);
+    if (!r) throw new HttpError(404, 'Requirement not found');
+    return c.json({ ...r, label: recordLabel(r) });
   });
 
   app.delete('/api/sessions/:id', async (c) => {

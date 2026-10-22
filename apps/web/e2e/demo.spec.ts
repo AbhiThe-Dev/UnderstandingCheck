@@ -51,4 +51,11 @@ test('seeded demo: suspected false alignment → private checks → confirmed di
   await expect(page).toHaveURL(/\/summary$/);
   await expect(page.getByTestId('agreed')).toContainText('confirmed through clarification');
   await expect(page.getByTestId('summary-markdown')).toHaveValue(/does not guarantee/);
+
+  // Confirmed decisions became versioned requirement records.
+  const records = page.getByTestId('published-records');
+  await expect(records).toContainText('Allow administrators to undo an approval: Also revoke access');
+  await records.getByRole('link', { name: /REQ-\d+ v1/ }).last().click();
+  await expect(page.getByTestId('record-current')).toContainText('Undoing the approval also revokes the access');
+  await expect(page.getByTestId('record-history')).toContainText('private scenario answer');
 });

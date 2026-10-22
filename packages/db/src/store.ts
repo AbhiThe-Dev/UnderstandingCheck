@@ -14,6 +14,7 @@ import {
   users,
   workspaces,
 } from './schema';
+import { RecordStore } from './records';
 import { searchColumns } from './symbolSearch';
 
 export type RepositoryRow = typeof repositories.$inferSelect;
@@ -42,10 +43,14 @@ function monthStart(now = new Date()) {
  * so one workspace can never read or modify another's rows.
  */
 export class WorkspaceStore {
+  readonly records: RecordStore;
+
   constructor(
     readonly db: Db,
     readonly workspaceId: string,
-  ) {}
+  ) {
+    this.records = new RecordStore(db, workspaceId);
+  }
 
   async workspace() {
     const [ws] = await this.db.select().from(workspaces).where(eq(workspaces.id, this.workspaceId));
@@ -255,8 +260,13 @@ export class WorkspaceStore {
     });
   }
 
-  /** Deletes the session, its transcript and everything derived from it (cascade). */
+  /**
+   * Deletes the session, its transcript and everything derived from it (cascade). Requirement records
+   * it produced keep the agreed text but lose the transcript quotes.
+   */
   async deleteSession(id: string) {
+    if (!(await this.getSession(id))) return;
+    await this.records.redactSession(id);
     await this.db.delete(meetingSessions).where(and(eq(meetingSessions.id, id), eq(meetingSessions.workspaceId, this.workspaceId)));
   }
 

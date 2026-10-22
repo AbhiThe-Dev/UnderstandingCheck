@@ -10,6 +10,8 @@ import {
   markers,
   parseTranscript,
   quoteAppearsIn,
+  recordDrafts,
+  wordDiff,
   redactSecrets,
   scoreDiscrepancy,
   validateCandidate,
@@ -201,5 +203,30 @@ describe('cost and secrets', () => {
     const out = redactSecrets(`const apiKey = "sk_live_abcdefghijklmnop";\nconst token = 'ghp_abcdefghijklmnopqrstuvwxyz1234';\nconst x = 1;`);
     expect(out).not.toContain('abcdefghijklmnop');
     expect(out).toContain('const x = 1;');
+  });
+});
+
+describe('requirement record helpers', () => {
+  it('diffs two versions word by word', () => {
+    expect(wordDiff('Undo revokes the access.', 'Undo keeps the access.')).toEqual([
+      { op: 'same', text: 'Undo ' },
+      { op: 'del', text: 'revokes' },
+      { op: 'add', text: 'keeps' },
+      { op: 'same', text: ' the access.' },
+    ]);
+  });
+
+  it('turns only confirmed, current requirements into record drafts with speaker names', () => {
+    const state = emptyState('s', 'abc');
+    state.participants.push({ id: 'p1', displayName: 'Priya', role: 'product_owner', ambiguous: false });
+    const base = { lineageId: 'L', evidence: [{ participantId: 'p1', segmentId: 's1', text: 'yes' }], confirmedBy: ['p1'], supersedes: null, discrepancyId: null, acceptanceCriteria: [], codeRefs: [] };
+    state.requirements.push(
+      { ...base, id: 'r1', description: 'old', status: 'superseded', confirmation: 'verbal', version: 1 },
+      { ...base, id: 'r2', description: 'proposal', status: 'proposed', confirmation: 'verbal', version: 1 },
+      { ...base, id: 'r3', description: 'Admins can undo approvals.', status: 'confirmed', confirmation: 'verbal', version: 2 },
+    );
+    expect(recordDrafts(state)).toEqual([
+      expect.objectContaining({ requirementId: 'r3', title: 'Admins can undo approvals.', confirmedBy: ['Priya'], evidence: [{ speaker: 'Priya', text: 'yes', kind: 'statement' }] }),
+    ]);
   });
 });

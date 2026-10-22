@@ -294,6 +294,8 @@ export const Requirement = z.object({
   version: z.number().int(),
   supersedes: z.string().nullable(),
   discrepancyId: z.string().nullable(),
+  /** Set when this decision settles a conflict with an earlier requirement record. */
+  priorRecord: z.object({ id: z.string(), outcome: z.enum(['supersedes', 'reaffirms']) }).nullable().optional(),
   acceptanceCriteria: z.array(z.string()),
   codeRefs: z.array(CodeRef),
 });

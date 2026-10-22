@@ -706,8 +706,11 @@ export class SessionEngine {
     const interp = d.interpretations.find((i) => i.id === interpretationId)!;
     const lineage = this.state.requirements.filter((r) => r.discrepancyId === d.id && r.status !== 'superseded');
     const prev = lineage.at(-1);
-    const firm = [...firmPositions(d).values()].filter((p) => d.relevantParticipantIds.includes(p.participantId));
+    // Only people in the room confirm a decision; an earlier record's position is context, not a vote.
+    const firm = [...firmPositions(d).values()].filter((p) => d.relevantParticipantIds.includes(p.participantId) && !isPriorRecord(p.participantId));
     const scenario = this.state.clarifications.find((c) => c.discrepancyId === d.id && c.scenario && c.purpose !== 'surface_difference')?.scenario;
+    // An earlier record's position is fixed; the team either kept it or replaced it.
+    const prior = [...d.positions].reverse().find((p) => isPriorRecord(p.participantId));
     const req: Requirement = {
       id: this.nextId('r'),
       lineageId: prev?.lineageId ?? `L${d.id}`,
@@ -721,6 +724,9 @@ export class SessionEngine {
       discrepancyId: d.id,
       acceptanceCriteria: [scenario ? `Given: ${scenario} Expected: ${interp.behavior}` : `Expected: ${interp.behavior}`],
       codeRefs: d.codeRefs,
+      priorRecord: prior
+        ? { id: prior.participantId.slice('prior:'.length), outcome: prior.interpretationId === interpretationId ? 'reaffirms' : 'supersedes' }
+        : null,
     };
     if (prev) prev.status = 'superseded';
     this.state.requirements.push(req);
@@ -737,7 +743,13 @@ export class SessionEngine {
     if (!claim.kinds.includes('agreement') || claim.ambiguousSpeaker) return;
     const window = this.state.claims.slice(-(this.cfg.agreementWindow + 1), -1).reverse();
     const target = window.find(
-      (c) => c.participantId !== claim.participantId && !c.ambiguousSpeaker && (c.kinds.includes('proposal') || c.kinds.includes('requirement')) && c.polarity !== 'negative',
+      (c) =>
+        c.participantId !== claim.participantId &&
+        !c.ambiguousSpeaker &&
+        // Earlier records are context, not something said in this meeting that can be agreed to again.
+        !isPriorRecord(c.participantId) &&
+        (c.kinds.includes('proposal') || c.kinds.includes('requirement')) &&
+        c.polarity !== 'negative',
     );
     if (!target || this.state.requirements.some((r) => r.evidence.some((e) => e.segmentId === target.segmentId))) return;
     const flagged = touched.find((d) => isOpen(d) && d.statements.some((s) => s.segmentId === target.segmentId));

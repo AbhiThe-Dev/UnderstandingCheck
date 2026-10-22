@@ -11,7 +11,7 @@ interface Dashboard {
   analyzer: 'heuristic' | 'llm';
   repos: RepoRow[];
   sessions: { id: string; title: string; status: string; startedAt: string; segmentCount: number; live: number }[];
-  counts: { open: number; resolved: number };
+  counts: { open: number; resolved: number; activeRequirements: number };
   budget: { spentUsd: number; limitUsd: number };
 }
 
@@ -69,8 +69,9 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <Stat label="Repositories" value={data?.repos.length} />
+        <Stat label="Agreed requirements" value={data?.counts.activeRequirements} href="/requirements" />
         <Stat label="Open discrepancies" value={data?.counts.open} />
         <Stat label="Resolved misunderstandings" value={data?.counts.resolved} />
         <Stat label="Model spend this month" value={data ? `${usd(data.budget.spentUsd)} / ${usd(data.budget.limitUsd)}` : undefined} />
@@ -120,11 +121,12 @@ export default function DashboardPage() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string | number | undefined }) {
-  return (
+function Stat({ label, value, href }: { label: string; value: string | number | undefined; href?: string }) {
+  const body = (
     <Card className="px-4 py-3">
       <div className="text-xs text-[var(--color-muted)]">{label}</div>
       <div className="mt-1 text-lg font-semibold tabular-nums">{value ?? '—'}</div>
     </Card>
   );
+  return href ? <Link href={href}>{body}</Link> : body;
 }

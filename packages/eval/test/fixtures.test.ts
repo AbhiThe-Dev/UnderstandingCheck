@@ -246,3 +246,16 @@ describe('Evaluation over all labeled fixtures', () => {
     expect(report.evidenceValidity).toBe(1);
   });
 });
+
+describe('earlier requirement records', () => {
+  it('do not silence a concern the meeting has not addressed, but are cited in it', async () => {
+    const r = await runCase({
+      ...SEEDED_DEMO,
+      priorDecisions: [{ id: 'rec-1', description: 'Undoing an approval also revokes the applicant’s portal access.', source: 'REQ-7 v2' }],
+    });
+    const [d, ...rest] = live(r);
+    expect(rest).toHaveLength(0);
+    expect(d!.key).toBe('effect:approveApplication:grantAccess');
+    expect(d!.description).toContain('An earlier decision covers this — REQ-7 v2');
+  });
+});

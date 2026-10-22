@@ -11,6 +11,7 @@ const NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/repos', label: 'Repositories' },
   { href: '/sessions/new', label: 'New session' },
+  { href: '/requirements', label: 'Requirements' },
   { href: '/admin/cost', label: 'Cost' },
 ];
 

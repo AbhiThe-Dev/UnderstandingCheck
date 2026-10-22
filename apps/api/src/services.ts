@@ -129,16 +129,20 @@ export class Services {
     githubIssueReference?: string | null;
     consentConfirmed: boolean;
     priorDecisions?: PriorDecision[];
+    /** Check the discussion against the repository's active requirement records (default true). */
+    includeRecords?: boolean;
   }) {
+    let priors = input.priorDecisions ?? [];
     if (input.repositoryId) {
       const repo = await this.store.getRepository(input.repositoryId);
       if (!repo) throw new HttpError(404, 'Repository not found');
       if (repo.indexingStatus !== 'ready') throw new HttpError(409, 'Repository is not indexed yet');
+      if (input.includeRecords !== false) priors = [...(await this.store.records.priorDecisionsFor(repo.id)), ...priors];
     }
     const row = await this.store.createSession({ ...input, analyzer: this.analyzerMode });
     const deps = await this.depsFor(row);
     const { engine } = await SessionEngine.create(
-      { sessionId: row.id, featureDescription: input.featureDescription ?? undefined, priorDecisions: input.priorDecisions },
+      { sessionId: row.id, featureDescription: input.featureDescription ?? undefined, priorDecisions: priors },
       deps,
     );
     this.engines.set(row.id, engine);

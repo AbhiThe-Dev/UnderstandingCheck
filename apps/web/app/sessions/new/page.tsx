@@ -16,6 +16,8 @@ export default function NewSessionPage() {
   const [issue, setIssue] = useState('');
   const [sampleId, setSampleId] = useState('');
   const [consent, setConsent] = useState(false);
+  const [includeRecords, setIncludeRecords] = useState(true);
+  const [activeRecords, setActiveRecords] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -29,6 +31,11 @@ export default function NewSessionPage() {
   }, []);
 
   const sample = samples?.transcripts.find((t) => t.id === sampleId);
+
+  useEffect(() => {
+    if (!repositoryId) return setActiveRecords(null);
+    api<unknown[]>(`/api/requirements?status=active&repositoryId=${repositoryId}`).then((r) => setActiveRecords(r.length), () => setActiveRecords(null));
+  }, [repositoryId]);
 
   const pickSample = (id: string) => {
     setSampleId(id);
@@ -53,6 +60,7 @@ export default function NewSessionPage() {
           githubIssueReference: issue || null,
           consentConfirmed: consent,
           priorDecisions: sample?.priorDecisions.length ? sample.priorDecisions : undefined,
+          includeRecords,
         },
       });
       router.push(`/sessions/${id}${sampleId ? `?sample=${sampleId}` : ''}`);
@@ -105,6 +113,15 @@ export default function NewSessionPage() {
           <Label htmlFor="issue">GitHub issue (optional)</Label>
           <Input id="issue" value={issue} onChange={(e) => setIssue(e.target.value)} placeholder="org/repo#123" />
         </div>
+        {repositoryId && (
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" checked={includeRecords} onChange={(e) => setIncludeRecords(e.target.checked)} className="mt-0.5" />
+            <span>
+              Check the discussion against this repository’s agreed requirements
+              <span className="text-[var(--color-muted)]"> ({activeRecords ?? '…'} active)</span>
+            </span>
+          </label>
+        )}
         <label className="flex items-start gap-2 rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 text-sm">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5" data-testid="consent" />
           <span>

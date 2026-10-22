@@ -86,3 +86,55 @@ export interface Samples {
   transcripts: SampleTranscript[];
   demo: { id: string; resolution: string };
 }
+
+export interface RecordVersion {
+  id: string;
+  version: number;
+  description: string;
+  acceptanceCriteria: string[];
+  codeRefs: import('@uc/core').CodeRef[];
+  evidence: import('@uc/core').RecordEvidence[];
+  evidenceRedacted: boolean;
+  confirmedBy: string[];
+  confirmation: 'verbal' | 'clarified';
+  concern: string | null;
+  origin: 'created' | 'supersedes';
+  revisedInMeeting: boolean;
+  sessionId: string | null;
+  sessionTitle: string;
+  createdAt: string;
+}
+
+export interface RecordRow {
+  id: string;
+  number: number;
+  title: string;
+  status: 'active' | 'retired';
+  retiredReason: string | null;
+  currentVersion: number;
+  repositoryId: string | null;
+  reaffirmations: { sessionId: string | null; sessionTitle: string; at: string; confirmedBy: string[] }[];
+  lastConfirmedAt: string;
+  createdAt: string;
+}
+
+export interface RecordListItem extends RecordRow {
+  label: string;
+  repositoryName: string | null;
+  current: RecordVersion;
+}
+
+export interface RecordDetail {
+  record: RecordRow;
+  versions: RecordVersion[];
+  label: string;
+  repositoryName: string | null;
+}
+
+export interface PublishedRecord {
+  recordId: string;
+  number: number;
+  version: number;
+  outcome: 'created' | 'superseded' | 'reaffirmed';
+  title: string;
+}

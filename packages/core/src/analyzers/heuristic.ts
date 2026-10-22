@@ -70,7 +70,7 @@ function mentions(effect: Effect, claim: Claim, exclude: string[] = []): boolean
 }
 
 /** Verbs that take something away. A statement using them argues *against* the thing it names. */
-const REMOVAL_RE = /\b(lose|loses|revoke|revoked|remove|removed|disable|disabled|block|blocked|prevent|skip|exclude|drop)\b/i;
+const REMOVAL_RE = /\b(lose|loses|revoke|revokes|revoked|remove|removes|removed|disable|disables|disabled|block|blocks|blocked|prevent|prevents|skip|skips|exclude|excludes|drop|drops)\b/i;
 
 /** Stance toward the topic: removal verbs ("lose access", "skip the email") argue against it. */
 function stance(c: Pick<Claim, 'polarity' | 'text'>): Claim['polarity'] {
@@ -228,7 +228,9 @@ export class HeuristicAnalyzer implements Analyzer {
     const fn = state.evidence.find((e) => e.id === focus.evidenceId);
     if (!fn) return null;
 
-    const discussed = claimsSince(state, focus.segmentId);
+    // Earlier records do not count as this meeting having addressed an effect: a proposal can still
+    // contradict them. They are cited in the suggestion instead.
+    const discussed = claimsSince(state, focus.segmentId).filter((c) => !c.participantId.startsWith('prior:'));
     const fnTerms = identifierTerms(fn.symbolName);
     const gaps = rankEffects(fn.effects.filter((e) => HIGH_CONSEQUENCE.has(e.category) && !isAddressed(e, discussed, fnTerms)));
     const top = gaps[0];
@@ -330,6 +332,10 @@ export class HeuristicAnalyzer implements Analyzer {
       codebase_conflict: `${capitalize(opWord)} also ${describeEffect(top)} — not covered by the proposal`,
       missing_specification: `Unspecified: what happens to ${effectObj} when the ${opWord} is ${reversalParticiple(focus.reversalWord)}`,
     };
+    const recorded = top ? state.claims.find((c) => c.participantId.startsWith('prior:') && mentions(top, c, fnTerms)) : undefined;
+    const recordNote = recorded
+      ? ` An earlier decision covers this — ${participantName(state, recorded.participantId).replace(/^Earlier decision \((.*)\)$/, '$1')}: “${truncate(recorded.text, 140)}” Check that the proposal is consistent with it.`
+      : '';
     const descriptions: Record<string, string> = {
       false_alignment: `The proposal changes ${mentionedDesc}, and ${participantName(state, agreer ?? '')} agreed. But ${fn.symbolName} also ${describeEffect(top)}, and nobody said whether that should be ${rv.participle}. The agreement could mean either interpretation.`,
       codebase_conflict: `The proposal changes ${mentionedDesc}. The existing ${fn.symbolName} also ${describeEffect(top)}, so reversing only part of it may leave the ${effectObj} in place. This is a potential conflict, not a confirmed defect.`,
@@ -340,7 +346,7 @@ export class HeuristicAnalyzer implements Analyzer {
       key: `effect:${fn.symbolName}:${top.target}`,
       category,
       title: titles[category]!,
-      description: descriptions[category]!,
+      description: descriptions[category]! + recordNote,
       quotes,
       codeRefs: [
         {

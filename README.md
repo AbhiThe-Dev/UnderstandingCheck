@@ -2,7 +2,7 @@
 
 A meeting copilot for software teams that catches **misunderstandings before they become code**. It indexes a repository, follows a speaker-labeled discussion, and privately suggests a clarification only when participants may expect *different behavior* — backed by quotes from the conversation and line-level references into the code. It is designed to stay silent when there is nothing consequential to say, and never to invent a disagreement.
 
-> **Status: Phases 1 (context-aware demo) and 2 (live transcript pipeline) complete.** Phases 3–5 are outlined at the end.
+> **Status: Phases 1 (context-aware demo), 2 (live transcript pipeline) and 5 (requirement records, without GitHub export) complete.** Phase 3 (GitHub App) was deferred; Phase 4 needs credentials. See the plan at the end.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ In the web app click **Try the demo**, then **Play**. The seeded scenario:
 | Command | What it does |
 | --- | --- |
 | `pnpm test` | Unit + integration tests (engine, fixtures, LLM path with scripted model, indexer, Postgres, API) |
-| `pnpm test:e2e` | Playwright browser test of the demo flow (uses installed Chrome; `PW_CHANNEL=chromium` for the bundled one) |
+| `pnpm test:e2e` | Playwright browser test of the demo flow on its own ports (API 4100, web 3100) and an in-memory database, so your data is untouched. Uses installed Chrome (`PW_CHANNEL=chromium` for the bundled one) |
 | `pnpm eval` | Precision/recall/false-positive/evidence-validity over all labeled fixtures |
 | `pnpm eval:live` | Same evaluation with the OpenAI analyzer (needs `OPENAI_API_KEY`) |
 | `pnpm trace <fixture-id>` | Turn-by-turn view of what the engine saw and decided |
@@ -57,6 +57,21 @@ Per-meeting metrics, from spec §12, are shown live on the session page and per 
 - **Pipeline:** ingest latency (p50/p95/max), analyses run vs. skipped, retrieval cache hits.
 - **Economics:** cost per meeting hour, per suggestion, per useful suggestion, and per confirmed misunderstanding.
 
+### Requirement records
+
+When a session ends, its **confirmed** decisions become workspace-level records (`REQ-1`, `REQ-2`, …). Proposals that were never confirmed are not recorded.
+
+- **Versioned and immutable:** each version keeps the agreed text, acceptance criteria, code references, who confirmed it, and the quotes and private scenario answers behind it.
+- **Checked by later meetings:** new sessions on the same repository load the active records as earlier decisions.
+  - If a discussion contradicts a record and the team settles on the new behavior, the record gets a new version (**superseded**).
+  - If the team settles on the recorded behavior, the record is **reaffirmed** without a new version.
+  - A record never silences a concern the meeting hasn't addressed; it is cited in the suggestion so the team can check the proposal against it.
+- **Retire or reactivate:** records can be retired; retired records are not used to check new sessions.
+- **Local export:** export as Markdown or JSON (`GET /api/requirements/export?format=md|json`). No external service is involved.
+- **Deleting a session** removes its quotes from any records it produced but keeps the agreed text.
+
+Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requirements/:id/status`, `GET /api/requirements/export`. Session creation accepts `includeRecords: false` to skip the check.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -65,7 +80,7 @@ Per-meeting metrics, from spec §12, are shown live on the session page and per 
 | `OPENAI_API_KEY` | — | **Not provided.** Required only for the model-backed analyzer |
 | `UC_MODEL_CHEAP` / `UC_MODEL_REASONING` | `gpt-5-mini` / `gpt-5` | Model names per tier — verify they are current for your account |
 | `UC_MODEL_PRICES_JSON` | built-in table | Override per-model prices used for cost estimates, e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}` |
-| `UC_DATA_DIR` | `.data/pglite` | Embedded Postgres data directory |
+| `UC_DATA_DIR` | `.data/pglite` | Embedded Postgres data directory; `:memory:` for a throwaway database |
 | `API_PORT`, `WEB_ORIGIN`, `NEXT_PUBLIC_API_URL` | 4000, `http://localhost:3000`, `http://127.0.0.1:4000` | Wiring between web and API |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | — | **Not provided.** Reserved for Phase 3 |
 
@@ -118,6 +133,6 @@ Read these numbers with care: the fixtures were written by the same author as th
 
 - **Phase 1 – context-aware demo** — done (this repository).
 - **Phase 2 – live transcript simulation** — done: server-side replay jobs with pause/step/speed, idempotent ingestion, per-meeting quality/friction/latency/cost metrics, usefulness feedback, and a 400-turn soak test. Not measured: whether a suggestion actually interrupted a real conversation (needs real meetings).
-- **Phase 3 – GitHub App** — installation-token auth with read-only Contents/Metadata/Issues, repository picker, shallow clone + incremental reindex by commit, code links, issue context, revocation, hosted Postgres/Supabase adapter, sign-in.
+- **Phase 3 – GitHub App** — *deferred.* Installation-token auth with read-only Contents/Metadata/Issues, repository picker, shallow clone + incremental reindex by commit, code links, issue context, revocation, hosted Postgres/Supabase adapter, sign-in.
 - **Phase 4 – meeting capture** — Electron companion with a `TranscriptSource` for OpenAI real-time transcription and Recall.ai’s Desktop SDK; consent UI; no spoken interruptions.
-- **Phase 5 – requirement records** — versioned records, GitHub issue export, PR deviation analysis later.
+- **Phase 5 – requirement records** — done without GitHub: versioned cross-session records, supersede/reaffirm, retire, history with diffs, local Markdown/JSON export, redaction on session deletion. Remaining (needs Phase 3): creating GitHub issues, linking records to pull requests, PR deviation analysis.

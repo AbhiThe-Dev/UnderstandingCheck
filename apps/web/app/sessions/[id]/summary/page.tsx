@@ -5,17 +5,17 @@ import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import type { MeetingSummary, Participant } from '@uc/core';
 import { Badge, Button, Card, CardHeader, CardTitle, Textarea } from '@/components/ui/primitives';
-import { api } from '@/lib/api';
+import { api, type PublishedRecord } from '@/lib/api';
 
 export default function SummaryPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const [data, setData] = useState<{ summary: MeetingSummary; markdown: string; participants: Participant[] } | null>(null);
+  const [data, setData] = useState<{ summary: MeetingSummary; markdown: string; participants: Participant[]; records: PublishedRecord[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    api<{ summary: MeetingSummary; markdown: string; participants: Participant[] }>(`/api/sessions/${id}/summary`).then(setData, (e: Error) => setError(e.message));
+    api<{ summary: MeetingSummary; markdown: string; participants: Participant[]; records: PublishedRecord[] }>(`/api/sessions/${id}/summary`).then(setData, (e: Error) => setError(e.message));
   }, [id]);
 
   if (error) return <Card className="p-6 text-sm">{error}</Card>;
@@ -109,6 +109,33 @@ export default function SummaryPage() {
         </Section>
       </div>
       <p className="text-xs text-[var(--color-muted)]">{s.disclaimer}</p>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Requirement records</CardTitle>
+          <Link href="/requirements" className="text-xs text-[var(--color-accent)]">
+            All requirements
+          </Link>
+        </CardHeader>
+        <ul className="space-y-1.5 px-4 py-3 text-sm" data-testid="published-records">
+          {data.records.length === 0 && (
+            <li className="text-[var(--color-muted)]">
+              {s.agreedChanges.length === 0 ? 'Nothing confirmed, so nothing was recorded.' : 'Confirmed decisions are recorded when the session ends.'}
+            </li>
+          )}
+          {data.records.map((r) => (
+            <li key={`${r.recordId}:${r.outcome}`}>
+              <Link href={`/requirements/${r.recordId}`} className="font-mono text-xs text-[var(--color-accent)]">
+                REQ-{r.number} v{r.version}
+              </Link>{' '}
+              <Badge tone={r.outcome === 'created' ? 'green' : r.outcome === 'superseded' ? 'amber' : 'blue'}>
+                {r.outcome === 'created' ? 'new' : r.outcome === 'superseded' ? 'replaced an earlier decision' : 'reaffirmed'}
+              </Badge>{' '}
+              {r.title}
+            </li>
+          ))}
+        </ul>
+      </Card>
 
       <Card>
         <CardHeader>
