@@ -1,0 +1,21 @@
+{
+  "name": "@uc/indexer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@uc/core": "workspace:*",
+    "tree-sitter-javascript": "^0.25.0",
+    "tree-sitter-typescript": "^0.23.2",
+    "web-tree-sitter": "^0.27.1"
+  },
+  "devDependencies": {
+    "@uc/fixtures": "workspace:*"
+  }
+}

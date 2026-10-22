@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+minimumReleaseAgeExclude:
+  - openai@7.42.0
+allowBuilds:
+  esbuild: true
+  tree-sitter-javascript: false
+  tree-sitter-typescript: false

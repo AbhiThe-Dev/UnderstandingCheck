@@ -1,0 +1,20 @@
+{
+  "name": "@uc/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@uc/core": "workspace:*",
+    "@uc/db": "workspace:*",
+    "@uc/fixtures": "workspace:*",
+    "@uc/indexer": "workspace:*",
+    "@uc/providers": "workspace:*",
+    "drizzle-orm": "^0.45.4"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "understanding-check",
+  "private": true,
+  "description": "AI Software Understanding Copilot: code-aware discrepancy detection for software discussions.",
+  "type": "module",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @uc/api --filter @uc/web dev",
+    "build": "pnpm typecheck && pnpm --filter @uc/web build",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "pnpm --filter @uc/web test:e2e",
+    "demo": "tsx packages/eval/src/demo.ts",
+    "eval": "tsx packages/eval/src/evaluate.ts",
+    "eval:live": "ANALYZER=llm tsx packages/eval/src/evaluate.ts",
+    "db:generate": "pnpm --filter @uc/db generate",
+    "start": "pnpm --parallel --filter @uc/api --filter @uc/web start",
+    "trace": "tsx packages/eval/src/trace.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "@types/node": "^24.19.2",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^16.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^5.0.5"
+  }
+}

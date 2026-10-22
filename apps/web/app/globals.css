@@ -1,0 +1,52 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --color-surface: #ffffff;
+  --color-canvas: #f6f7f9;
+  --color-ink: #16181d;
+  --color-muted: #5d6470;
+  --color-line: #e3e6eb;
+  --color-accent: #4f46e5;
+  --color-accent-soft: #eef0ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: #16181d;
+    --color-canvas: #0e0f12;
+    --color-ink: #e8eaee;
+    --color-muted: #9aa1ad;
+    --color-line: #2a2e36;
+    --color-accent: #8b85ff;
+    --color-accent-soft: #23234a;
+  }
+}
+
+html,
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+@keyframes settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.settle-in {
+  animation: settle-in 400ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settle-in {
+    animation: none;
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@uc/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/app.ts"
+  },
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "@uc/core": "workspace:*",
+    "@uc/db": "workspace:*",
+    "@uc/fixtures": "workspace:*",
+    "@uc/indexer": "workspace:*",
+    "@uc/providers": "workspace:*",
+    "hono": "^4.13.13",
+    "zod": "^4.6.7"
+  }
+}

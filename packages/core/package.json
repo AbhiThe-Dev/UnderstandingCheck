@@ -1,0 +1,16 @@
+{
+  "name": "@uc/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "stemmer": "^2.0.1",
+    "zod": "^4.6.7"
+  }
+}
