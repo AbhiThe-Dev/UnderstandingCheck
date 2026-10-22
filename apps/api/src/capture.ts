@@ -26,6 +26,9 @@ export interface MicrophoneConnection {
   close(): void;
 }
 
+/** How long a committed turn may take to transcribe before later turns stop waiting for it. */
+const TURN_TIMEOUT_MS = 20_000;
+
 type MakeError = (status: 400 | 404 | 409 | 422 | 503, message: string) => HttpErrorType;
 
 /**
@@ -147,27 +150,70 @@ export class CaptureManager {
     info.model = transcriber.model;
     const pricePerMinute = transcriptionPricesFrom(process.env.UC_TRANSCRIPTION_PRICES_JSON)[transcriber.model] ?? 0;
 
-    // Turns are attributed to whoever was speaking when the turn was committed, not when its
-    // transcript arrives (which can be after the operator switched speakers).
-    const speakerByItem = new Map<string, string>();
-    transcriber.on('committed', ({ itemId }) => speakerByItem.set(itemId, info.speaker ?? 'Room'));
-    transcriber.on('partial', ({ text }) => {
-      info.partial = { speaker: info.speaker ?? 'Room', text };
-      conn.send({ type: 'partial', text, speaker: info.speaker });
+    // Turns are attributed to the speaker selected when the turn was committed locally (acknowledgements
+    // can lag behind a speaker switch), and reach the engine in the order they were spoken: transcripts
+    // for short turns often complete before longer, earlier ones.
+    interface Turn {
+      seq: number;
+      itemId: string;
+      speaker: string;
+      text: string | null;
+      done: boolean;
+    }
+    const turns: Turn[] = [];
+    const early = new Map<string, string>();
+    let delivering: Promise<void> = Promise.resolve();
+    transcriber.setTag(speaker);
+
+    const drain = () => {
+      delivering = delivering.then(async () => {
+        while (turns[0]?.done) {
+          const t = turns.shift()!;
+          if (!t.text) continue; // silence or a turn that never completed
+          try {
+            const { events } = await this.services.run(sessionId, (engine) => engine.ingest({ speaker: t.speaker, text: t.text!, externalId: `mic:${t.itemId}` }));
+            const seg = events.find((e) => e.type === 'segment_added');
+            info.segments++;
+            conn.send({ type: 'final', text: t.text, speaker: t.speaker, segmentId: seg?.type === 'segment_added' ? seg.segment.id : null });
+          } catch (err) {
+            conn.send({ type: 'error', message: (err as Error).message });
+          }
+        }
+      });
+    };
+
+    transcriber.on('committed', ({ itemId, seq, tag }) => {
+      const turn: Turn = { seq, itemId, speaker: tag ?? 'Room', text: null, done: false };
+      turns.push(turn);
+      turns.sort((a, b) => a.seq - b.seq);
+      if (early.has(itemId)) {
+        turn.text = early.get(itemId)!;
+        turn.done = true;
+        early.delete(itemId);
+        drain();
+      }
+      // Never let one lost transcript hold back everything said after it.
+      setTimeout(() => {
+        if (!turn.done) {
+          turn.done = true;
+          conn.send({ type: 'error', message: 'A turn was not transcribed in time and was skipped' });
+          drain();
+        }
+      }, TURN_TIMEOUT_MS).unref();
+    });
+    transcriber.on('partial', ({ itemId, text }) => {
+      const who = turns.find((t) => t.itemId === itemId)?.speaker ?? info.speaker ?? 'Room';
+      info.partial = { speaker: who, text };
+      conn.send({ type: 'partial', text, speaker: who });
       this.services.notify(sessionId);
     });
     transcriber.on('final', ({ itemId, text }) => {
       info.partial = null;
-      const who = speakerByItem.get(itemId) ?? info.speaker ?? 'Room';
-      speakerByItem.delete(itemId);
-      void this.services
-        .run(sessionId, (engine) => engine.ingest({ speaker: who, text, externalId: `mic:${itemId}` }))
-        .then(({ events }) => {
-          const seg = events.find((e) => e.type === 'segment_added');
-          info.segments++;
-          conn.send({ type: 'final', text, speaker: who, segmentId: seg?.type === 'segment_added' ? seg.segment.id : null });
-        })
-        .catch((err: Error) => conn.send({ type: 'error', message: err.message }));
+      const turn = turns.find((t) => t.itemId === itemId);
+      if (!turn) return void early.set(itemId, text);
+      turn.text = text;
+      turn.done = true;
+      drain();
     });
     transcriber.on('error', ({ code, message }) => {
       conn.send({ type: 'error', code, message });
@@ -191,6 +237,10 @@ export class CaptureManager {
       if (closed) return;
       closed = true;
       await transcriber.close();
+      // Let turns still being transcribed land before reporting the capture as stopped.
+      const deadline = Date.now() + TURN_TIMEOUT_MS;
+      while (turns.some((t) => !t.done) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+      await delivering;
       info.audioSeconds = Math.round(transcriber.audioSeconds);
       if (transcriber.audioSeconds > 0) {
         await this.services.store.recordUsage({
@@ -217,6 +267,7 @@ export class CaptureManager {
           // Finish the previous speaker's turn before attributing new audio to someone else.
           transcriber.commit();
           info.speaker = msg.name.trim().slice(0, 80);
+          transcriber.setTag(info.speaker);
           this.services.notify(sessionId);
         }
         if (msg.type === 'stop') void finish().then(() => conn.close());

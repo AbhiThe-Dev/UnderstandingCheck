@@ -9,9 +9,14 @@ const MAX_TURN_SECONDS = 15;
 
 export interface LiveTranscriberEvents {
   ready: [];
-  /** A turn was committed; its transcript will arrive later with this item id. */
-  committed: [{ itemId: string }];
+  /**
+   * The server acknowledged a turn. `seq` is the order in which it was committed locally and `tag`
+   * the label active at that moment (e.g. the speaker); acknowledgements arrive in commit order, but
+   * transcripts for different turns can complete out of order.
+   */
+  committed: [{ itemId: string; seq: number; tag: string | null }];
   partial: [{ itemId: string; text: string }];
+  /** A turn finished. `text` can be empty (e.g. silence); it still marks the turn as done. */
   final: [{ itemId: string; text: string }];
   error: [{ code: string; message: string }];
   closed: [];
@@ -24,6 +29,8 @@ export interface LiveTranscriber extends EventEmitter<LiveTranscriberEvents> {
   readonly audioSeconds: number;
   start(): Promise<void>;
   appendPcm16(chunk: Buffer): void;
+  /** Label attached to turns committed from now on (e.g. the current speaker). */
+  setTag(tag: string | null): void;
   /** End the current turn: whatever was appended since the last commit is transcribed. */
   commit(): void;
   close(): Promise<void>;
@@ -47,6 +54,10 @@ export class OpenAiLiveTranscriber extends EventEmitter<LiveTranscriberEvents> i
   private pendingBytes = 0;
   private totalBytes = 0;
   private partials = new Map<string, string>();
+  private tag: string | null = null;
+  /** Tags of turns committed locally and not yet acknowledged, in commit order. */
+  private awaitingAck: { seq: number; tag: string | null }[] = [];
+  private seq = 0;
 
   constructor(private readonly opts: OpenAiLiveOptions) {
     super();
@@ -97,9 +108,12 @@ export class OpenAiLiveTranscriber extends EventEmitter<LiveTranscriberEvents> i
               resolve();
             }
             break;
-          case 'input_audio_buffer.committed':
-            this.emit('committed', { itemId: String(ev.item_id) });
+          case 'input_audio_buffer.committed': {
+            // The server processes commits in the order they were sent.
+            const local = this.awaitingAck.shift() ?? { seq: ++this.seq, tag: this.tag };
+            this.emit('committed', { itemId: String(ev.item_id), seq: local.seq, tag: local.tag });
             break;
+          }
           case 'conversation.item.input_audio_transcription.delta': {
             const id = String(ev.item_id);
             const text = (this.partials.get(id) ?? '') + String(ev.delta ?? '');
@@ -111,7 +125,7 @@ export class OpenAiLiveTranscriber extends EventEmitter<LiveTranscriberEvents> i
             const id = String(ev.item_id);
             const text = String(ev.transcript ?? this.partials.get(id) ?? '').trim();
             this.partials.delete(id);
-            if (text) this.emit('final', { itemId: id, text });
+            this.emit('final', { itemId: id, text });
             break;
           }
           case 'error': {
@@ -151,10 +165,15 @@ export class OpenAiLiveTranscriber extends EventEmitter<LiveTranscriberEvents> i
     if (this.pendingBytes >= MAX_TURN_SECONDS * BYTES_PER_SECOND) this.commit();
   }
 
+  setTag(tag: string | null) {
+    this.tag = tag;
+  }
+
   commit() {
     // Committing an empty buffer is an error on the server; a short blip is not worth a turn.
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.pendingBytes < BYTES_PER_SECOND / 10) return;
     this.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    this.awaitingAck.push({ seq: ++this.seq, tag: this.tag });
     this.pendingBytes = 0;
   }
 

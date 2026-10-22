@@ -6,16 +6,23 @@ import WebSocket from 'ws';
 import { createApp } from '../src/app';
 import { Services } from '../src/services';
 
-/** Each commit becomes one final utterance, taken from a script. */
+/**
+ * Behaves like the real Realtime API: acknowledgements arrive after a delay (possibly after the
+ * operator switched speakers), and shorter turns finish transcribing before longer, earlier ones.
+ */
 class FakeTranscriber extends EventEmitter<LiveTranscriberEvents> implements LiveTranscriber {
   readonly model = 'gpt-live-transcribe';
   audioSeconds = 0;
   private pending = 0;
   private n = 0;
+  private tag: string | null = null;
   constructor(private script: string[]) {
     super();
   }
   async start() {}
+  setTag(tag: string | null) {
+    this.tag = tag;
+  }
   appendPcm16(chunk: Buffer) {
     this.pending += chunk.length;
     this.audioSeconds += chunk.length / 48_000;
@@ -23,14 +30,15 @@ class FakeTranscriber extends EventEmitter<LiveTranscriberEvents> implements Liv
   commit() {
     if (!this.pending) return;
     this.pending = 0;
-    const itemId = `item_${++this.n}`;
-    this.emit('committed', { itemId });
+    const seq = ++this.n;
+    const itemId = `item_${seq}`;
+    const tag = this.tag;
     const text = this.script.shift() ?? '';
-    // Transcripts arrive after the commit, possibly after the speaker changed.
+    setTimeout(() => this.emit('committed', { itemId, seq, tag }), 40);
     setTimeout(() => {
       this.emit('partial', { itemId, text: text.slice(0, 5) });
       this.emit('final', { itemId, text });
-    }, 30);
+    }, 60 + text.length * 3);
   }
   async close() {
     this.commit();
@@ -151,29 +159,33 @@ describe('microphone capture', () => {
   it('transcribes turns, attributes them to the speaker at commit time, and records cost', async () => {
     const { body } = await call('POST', '/api/demo');
     const id = body.id as string;
-    script.push('Admins need to be able to undo an approval.', "I'll just set the status back to pending.", 'Sounds good.');
+    script.push('Admins need to be able to undo an approval when a reviewer approves the wrong application.', "Easy enough, I'll just set the status back to pending.", 'Sounds good.');
     const ws = open(id, 'consent=1&speaker=Priya');
     const got = messages(ws);
     await until(() => got.some((m) => m.type === 'ready'));
 
     const second = Buffer.alloc(48_000); // one second of PCM16 at 24 kHz
+    // Priya speaks; the operator taps Sam (committing Priya's turn); Sam speaks; the operator taps
+    // Priya; Priya says "Sounds good." and pauses. Everything is sent at once, so every acknowledgement
+    // arrives after the last switch, and the short final turn finishes transcribing first.
     ws.send(second);
-    ws.send(JSON.stringify({ type: 'commit' }));
-    ws.send(second);
-    // Switching speaker commits the chunk so far as Priya's turn; Sam speaks next.
     ws.send(JSON.stringify({ type: 'speaker', name: 'Sam' }));
+    ws.send(second);
+    ws.send(JSON.stringify({ type: 'speaker', name: 'Priya' }));
     ws.send(second);
     ws.send(JSON.stringify({ type: 'commit' }));
     await until(() => got.filter((m) => m.type === 'final').length === 3);
     expect(got.filter((m) => m.type === 'final').map((m) => `${m.speaker}: ${m.text}`)).toEqual([
-      'Priya: Admins need to be able to undo an approval.',
-      "Priya: I'll just set the status back to pending.",
-      'Sam: Sounds good.',
+      'Priya: Admins need to be able to undo an approval when a reviewer approves the wrong application.',
+      "Sam: Easy enough, I'll just set the status back to pending.",
+      'Priya: Sounds good.',
     ]);
 
     const live = (await call('GET', `/api/sessions/${id}`)).body;
-    expect(live.capture).toMatchObject({ source: 'microphone', status: 'live', segments: 3, speaker: 'Sam' });
+    expect(live.capture).toMatchObject({ source: 'microphone', status: 'live', segments: 3, speaker: 'Priya' });
     expect(live.segments).toHaveLength(3);
+    // In spoken order, the engine sees proposal-then-agreement and suspects false alignment.
+    expect(live.state.discrepancies.find((d: any) => d.visibility === 'live')).toMatchObject({ category: 'false_alignment' });
 
     ws.send(JSON.stringify({ type: 'stop' }));
     await new Promise((r) => ws.on('close', r));
