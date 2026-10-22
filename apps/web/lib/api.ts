@@ -1,4 +1,4 @@
-import type { Segment, SessionState } from '@uc/core';
+import type { Segment, SessionMetrics, SessionState } from '@uc/core';
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:4000';
 
@@ -23,10 +23,21 @@ export async function api<T = unknown>(path: string, init?: { method?: string; b
   return data as T;
 }
 
+export interface ReplayInfo {
+  jobId: string;
+  status: 'idle' | 'playing' | 'paused' | 'finished' | 'stopped' | 'failed';
+  delivered: number;
+  total: number;
+  speed: number;
+  error: string | null;
+}
+
 export interface SessionView {
   state: SessionState;
   segments: Segment[];
   status: 'active' | 'ended';
+  replay: ReplayInfo | null;
+  metrics: SessionMetrics;
 }
 
 export interface SessionMeta {

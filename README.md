@@ -2,7 +2,7 @@
 
 A meeting copilot for software teams that catches **misunderstandings before they become code**. It indexes a repository, follows a speaker-labeled discussion, and privately suggests a clarification only when participants may expect *different behavior* — backed by quotes from the conversation and line-level references into the code. It is designed to stay silent when there is nothing consequential to say, and never to invent a disagreement.
 
-> **Status: Phase 1 (working context-aware demo) complete.** Phases 2–5 are outlined at the end.
+> **Status: Phases 1 (context-aware demo) and 2 (live transcript pipeline) complete.** Phases 3–5 are outlined at the end.
 
 ## Quick start
 
@@ -34,13 +34,28 @@ In the web app click **Try the demo**, then **Play**. The seeded scenario:
 | `pnpm trace <fixture-id>` | Turn-by-turn view of what the engine saw and decided |
 | `pnpm lint` / `pnpm typecheck` / `pnpm build` | Quality gates |
 
-Live transcript ingestion (Mode B) — anything that produces transcript text can stream into a session:
+### Live pipeline
+
+Live transcript ingestion (Mode B) — anything that produces transcript text can stream into a session. Send an `externalId` so retries from the source are ignored instead of double-counted:
 
 ```bash
-curl -X POST http://127.0.0.1:4000/api/sessions/<id>/segments -H 'content-type: application/json' -d '{"speaker":"Priya","role":"product_owner","text":"Sounds good.","timestamp":12000}'
+curl -X POST http://127.0.0.1:4000/api/sessions/<id>/segments -H 'content-type: application/json' -d '{"speaker":"Priya","role":"product_owner","text":"Sounds good.","timestamp":12000,"externalId":"zoom-42"}'
 ```
 
-Open sessions update live in the browser over Server-Sent Events.
+Server-side replay (Mode A) simulates a meeting without paying for transcription. It paces turns by their timestamps (or by how long they take to say), at 0.25×–50× speed, and feeds the same serialized pipeline as live input. Every open viewer sees it over Server-Sent Events.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/sessions/:id/replay` `{text, speed, paused?}` | Start a replay. Replaying a transcript that already finished in this session is refused unless `force: true` |
+| `POST /api/sessions/:id/replay/control` `{action?: pause\|resume\|step\|stop, speed?}` | Control it mid-meeting |
+| `GET /api/sessions/:id/metrics` | Meeting metrics (below) |
+
+Per-meeting metrics, from spec §12, are shown live on the session page and per session on the Cost page:
+
+- **Quality:** suggestions shown and per hour, share that revealed a real difference, share resolved in the meeting, share rated useful, duplicate-candidate rate.
+- **Friction:** dismissal rate and median time from suggestion to resolution.
+- **Pipeline:** ingest latency (p50/p95/max), analyses run vs. skipped, retrieval cache hits.
+- **Economics:** cost per meeting hour, per suggestion, per useful suggestion, and per confirmed misunderstanding.
 
 ## Configuration
 
@@ -102,7 +117,7 @@ Read these numbers with care: the fixtures were written by the same author as th
 ## Phase plan
 
 - **Phase 1 – context-aware demo** — done (this repository).
-- **Phase 2 – live transcript simulation** — partly in place (incremental ingestion endpoint, SSE updates, adjustable-speed replay, dedupe). Remaining: server-side replay jobs, metrics on time-to-resolution and interruption, load testing.
+- **Phase 2 – live transcript simulation** — done: server-side replay jobs with pause/step/speed, idempotent ingestion, per-meeting quality/friction/latency/cost metrics, usefulness feedback, and a 400-turn soak test. Not measured: whether a suggestion actually interrupted a real conversation (needs real meetings).
 - **Phase 3 – GitHub App** — installation-token auth with read-only Contents/Metadata/Issues, repository picker, shallow clone + incremental reindex by commit, code links, issue context, revocation, hosted Postgres/Supabase adapter, sign-in.
 - **Phase 4 – meeting capture** — Electron companion with a `TranscriptSource` for OpenAI real-time transcription and Recall.ai’s Desktop SDK; consent UI; no spoken interruptions.
 - **Phase 5 – requirement records** — versioned records, GitHub issue export, PR deviation analysis later.

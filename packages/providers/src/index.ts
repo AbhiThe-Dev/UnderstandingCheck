@@ -3,7 +3,7 @@ import { OpenAiProvider } from './openai';
 
 export { OpenAiProvider, type OpenAiProviderOptions } from './openai';
 export { ScriptedLlmProvider } from './scripted';
-export { ReplayTranscriptSource, type TranscriptSource } from './transcription';
+export { MAX_SPEED, MIN_SPEED, ReplayTranscriptSource, type ReplayOptions, type ReplayStatus, type TranscriptSource } from './transcription';
 
 /** Returns null when no credentials are configured; callers then use the heuristic analyzer. */
 export function createLlmProviderFromEnv(env: NodeJS.ProcessEnv = process.env): LlmProvider | null {

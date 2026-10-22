@@ -6,10 +6,12 @@ import { z } from 'zod';
 import {
   ParticipantRole,
   pricesFrom,
+  sessionMetrics,
   buildSummary,
   parseTranscript,
   summaryToMarkdown,
   type EngineEvent,
+  type SessionState,
 } from '@uc/core';
 import { CASES, SAMPLE_REPOS, SEEDED_DEMO, SEEDED_DEMO_RESOLUTION, type RepoName } from '@uc/fixtures';
 import { HttpError, type Services, type SessionSnapshot } from './services';
@@ -19,6 +21,7 @@ const SegmentBody = z.object({
   role: ParticipantRole.optional(),
   text: z.string().trim().min(1).max(4000),
   timestamp: z.number().int().nonnegative().optional(),
+  externalId: z.string().trim().min(1).max(128).optional(),
 });
 
 const SessionBody = z.object({
@@ -30,7 +33,16 @@ const SessionBody = z.object({
   priorDecisions: z.array(z.object({ id: z.string().max(60), description: z.string().max(500), source: z.string().max(100) })).max(20).optional(),
 });
 
-const ActionBody = z.object({ action: z.enum(['ask_now', 'dismiss', 'save_for_later', 'restore']) });
+const ActionBody = z.object({ action: z.enum(['ask_now', 'dismiss', 'save_for_later', 'restore', 'mark_useful', 'mark_not_useful']) });
+const ReplayBody = z.object({
+  text: z.string().min(1).max(200_000),
+  speed: z.number().min(0.25).max(50).default(4),
+  paused: z.boolean().optional(),
+  force: z.boolean().optional(),
+});
+const ReplayControlBody = z
+  .object({ action: z.enum(['pause', 'resume', 'step', 'stop']).optional(), speed: z.number().min(0.25).max(50).optional() })
+  .refine((b) => b.action || b.speed !== undefined, 'Provide an action or a speed');
 const ResponseBody = z.object({
   participantId: z.string().min(1),
   interpretationId: z.string().nullish(),
@@ -59,12 +71,16 @@ function eventSummary(events: EngineEvent[]) {
     });
 }
 
-function view(s: SessionSnapshot) {
-  return { state: s.state, segments: s.segments, status: s.status };
-}
-
 export function createApp(services: Services, opts: { webOrigin?: string } = {}) {
   const app = new Hono();
+  /** What the UI renders: engine state plus live replay progress and meeting metrics. */
+  const view = (s: SessionSnapshot) => ({
+    state: s.state,
+    segments: s.segments,
+    status: s.status,
+    replay: services.replays.status(s.state.sessionId),
+    metrics: sessionMetrics(s.state, s.segments),
+  });
   const origin = opts.webOrigin ?? process.env.WEB_ORIGIN ?? 'http://localhost:3000';
 
   app.use('*', cors({ origin: [origin, 'http://127.0.0.1:3000'], allowMethods: ['GET', 'POST', 'PATCH', 'DELETE'] }));
@@ -207,6 +223,22 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     return c.json({ events: eventSummary(events), ...view(snapshot) });
   });
 
+  /** Server-side replay: simulate a live meeting at adjustable speed; every viewer sees it over SSE. */
+  app.post('/api/sessions/:id/replay', async (c) => {
+    const body = await json(c, ReplayBody);
+    return c.json(await services.replays.start(c.req.param('id'), body.text, body), 202);
+  });
+
+  app.post('/api/sessions/:id/replay/control', async (c) => {
+    const body = await json(c, ReplayControlBody);
+    return c.json(services.replays.control(c.req.param('id'), body.action ?? null, body.speed));
+  });
+
+  app.get('/api/sessions/:id/metrics', async (c) => {
+    const s = await services.snapshot(c.req.param('id'));
+    return c.json(sessionMetrics(s.state, s.segments));
+  });
+
   app.get('/api/sessions/:id/stream', async (c) => {
     const id = c.req.param('id');
     const initial = await services.snapshot(id);
@@ -257,6 +289,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
   });
 
   app.post('/api/sessions/:id/end', async (c) => {
+    services.replays.stop(c.req.param('id'));
     const { snapshot } = await services.run(c.req.param('id'), (engine) => engine.finalize(), { ended: true });
     return c.json(view(snapshot));
   });
@@ -281,32 +314,35 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
       services.store.spentThisMonthUsd(),
       services.store.workspace(),
     ]);
-    const bySession = sessions.map((s) => {
-      const r = rows.filter((u) => u.sessionId === s.id);
-      const st = s.state as { metrics?: Record<string, number>; discrepancies?: { status: string; history: { status: string }[]; surfacedAtSegmentIndex: number | null }[] } | null;
-      const surfacedList = (st?.discrepancies ?? []).filter((d) => d.surfacedAtSegmentIndex !== null);
-      const confirmed = surfacedList.filter((d) => d.history.some((h) => h.status === 'different_expectations_confirmed')).length;
-      const cost = r.reduce((x, u) => x + u.estimatedCost, 0);
-      return {
-        id: s.id,
-        title: s.title,
-        analyzer: s.analyzer,
-        calls: r.length,
-        inputTokens: r.reduce((x, u) => x + u.inputTokens, 0),
-        outputTokens: r.reduce((x, u) => x + u.outputTokens, 0),
-        costUsd: cost,
-        segments: st?.metrics?.segmentsSeen ?? 0,
-        analyses: st?.metrics?.analysesRun ?? 0,
-        skipped: st?.metrics?.analysesSkipped ?? 0,
-        retrievals: st?.metrics?.retrievals ?? 0,
-        cacheHits: st?.metrics?.retrievalCacheHits ?? 0,
-        suggestions: surfacedList.length,
-        dismissed: surfacedList.filter((d) => d.status === 'dismissed').length,
-        confirmedMisunderstandings: confirmed,
-        costPerSuggestion: surfacedList.length ? cost / surfacedList.length : null,
-        costPerConfirmedMisunderstanding: confirmed ? cost / confirmed : null,
-      };
-    });
+    const bySession = await Promise.all(
+      sessions.map(async (s) => {
+        const r = rows.filter((u) => u.sessionId === s.id);
+        const st = s.state as SessionState | null;
+        const m = st ? sessionMetrics(st, await services.store.loadSegments(s.id)) : null;
+        const surfacedList = st?.discrepancies.filter((d) => d.surfacedAtSegmentIndex !== null) ?? [];
+        const confirmed = surfacedList.filter((d) => d.history.some((h) => h.status === 'different_expectations_confirmed')).length;
+        const cost = r.reduce((x, u) => x + u.estimatedCost, 0);
+        const hours = m && m.meetingDurationMs > 0 ? m.meetingDurationMs / 3_600_000 : null;
+        return {
+          id: s.id,
+          title: s.title,
+          analyzer: s.analyzer,
+          calls: r.length,
+          inputTokens: r.reduce((x, u) => x + u.inputTokens, 0),
+          outputTokens: r.reduce((x, u) => x + u.outputTokens, 0),
+          costUsd: cost,
+          metrics: m,
+          confirmedMisunderstandings: confirmed,
+          costPerMeetingHour: hours ? cost / hours : null,
+          costPerSuggestion: surfacedList.length ? cost / surfacedList.length : null,
+          costPerUsefulSuggestion: (() => {
+            const useful = surfacedList.filter((d) => d.feedback === 'useful').length;
+            return useful ? cost / useful : null;
+          })(),
+          costPerConfirmedMisunderstanding: confirmed ? cost / confirmed : null,
+        };
+      }),
+    );
     const byOperation = Object.values(
       rows.reduce<Record<string, { operation: string; model: string; calls: number; inputTokens: number; outputTokens: number; costUsd: number }>>((acc, u) => {
         const k = `${u.operation}:${u.model}`;

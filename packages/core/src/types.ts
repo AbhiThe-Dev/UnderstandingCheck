@@ -27,6 +27,8 @@ export const TranscriptSegmentInput = z.object({
   text: z.string().min(1),
   /** Milliseconds from meeting start. */
   timestamp: z.number().int().nonnegative().optional(),
+  /** Source-assigned id; a segment re-sent with the same id (e.g. a retry) is ignored. */
+  externalId: z.string().min(1).max(128).optional(),
 });
 export type TranscriptSegmentInput = z.infer<typeof TranscriptSegmentInput>;
 
@@ -230,6 +232,8 @@ export const Discrepancy = z.object({
     z.object({ at: z.number().int(), status: DiscrepancyStatus, note: z.string() }),
   ),
   notes: z.array(z.string()),
+  /** The user's rating of the suggestion, used for the "useful questions" metric. */
+  feedback: z.enum(['useful', 'not_useful']).nullable().optional(),
   /** Context for templating questions (heuristic analyzer) — free-form, not shown. */
   meta: z.record(z.string(), z.string()).default({}),
 });
@@ -327,6 +331,10 @@ export const EngineMetrics = z.object({
   rejectionReasons: z.record(z.string(), z.number().int()),
   suggestionsSurfaced: z.number().int(),
   duplicatesSuppressed: z.number().int(),
+  /** Segments dropped because their externalId was already ingested. */
+  duplicateSegments: z.number().int().optional(),
+  /** Processing time of the most recent ingests (ms), newest last; bounded. */
+  latencyMs: z.array(z.number()).optional(),
 });
 export type EngineMetrics = z.infer<typeof EngineMetrics>;
 
@@ -360,6 +368,8 @@ export const SessionState = z.object({
   budgetExhausted: z.boolean(),
   ended: z.boolean(),
   counters: z.record(z.string(), z.number().int()),
+  /** externalIds already ingested (idempotent live ingestion). */
+  externalIds: z.array(z.string()).optional(),
 });
 export type SessionState = z.infer<typeof SessionState>;
 
@@ -367,6 +377,7 @@ export type SessionState = z.infer<typeof SessionState>;
 
 export type EngineEvent =
   | { type: 'segment_added'; segment: Segment }
+  | { type: 'duplicate_segment'; externalId: string }
   | { type: 'participant_added'; participant: Participant }
   | { type: 'analysis_skipped'; segmentId: string; reason: string }
   | { type: 'context_retrieved'; evidenceIds: string[]; sufficient: boolean }

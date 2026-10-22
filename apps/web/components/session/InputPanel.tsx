@@ -2,17 +2,27 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { parseTranscript, type TranscriptSegmentInput } from '@uc/core';
-import { Button, Input, Textarea } from '@/components/ui/primitives';
-import { API_URL, type Samples } from '@/lib/api';
+import { Badge, Button, Input, Textarea } from '@/components/ui/primitives';
+import { API_URL, api, type ReplayInfo, type Samples } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 type Send = (seg: TranscriptSegmentInput) => Promise<void>;
 
+interface Props {
+  sessionId: string;
+  send: Send;
+  samples: Samples | null;
+  initialSample?: string;
+  speakers: string[];
+  disabled: boolean;
+  replay: ReplayInfo | null;
+}
+
 /**
- * Mode A (replay a transcript at adjustable speed, segment by segment) and Mode B (live input
- * through the same streaming endpoint an external transcription source would use).
+ * Mode A (server-side replay of a transcript at adjustable speed) and Mode B (live input through
+ * the same streaming endpoint an external transcription source would use).
  */
-export function InputPanel(props: { sessionId: string; send: Send; samples: Samples | null; initialSample?: string; speakers: string[]; disabled: boolean }) {
+export function InputPanel(props: Props) {
   const [tab, setTab] = useState<'replay' | 'live'>('replay');
   return (
     <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)]">
@@ -28,15 +38,20 @@ export function InputPanel(props: { sessionId: string; send: Send; samples: Samp
   );
 }
 
-function Replay({ send, samples, initialSample, disabled }: Parameters<typeof InputPanel>[0]) {
+const STATUS_TONE: Record<ReplayInfo['status'], 'accent' | 'amber' | 'green' | 'red' | 'neutral'> = {
+  idle: 'neutral',
+  playing: 'accent',
+  paused: 'amber',
+  finished: 'green',
+  stopped: 'neutral',
+  failed: 'red',
+};
+
+function Replay({ sessionId, samples, initialSample, disabled, replay }: Props) {
   const [text, setText] = useState('');
-  const [speed, setSpeed] = useState(4);
-  const [cursor, setCursor] = useState(0);
-  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(replay?.speed ?? 4);
   const [error, setError] = useState<string | null>(null);
-  const speedRef = useRef(speed);
-  const playingRef = useRef(false);
-  speedRef.current = speed;
+  const speedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!samples || !initialSample || text) return;
@@ -44,106 +59,100 @@ function Replay({ send, samples, initialSample, disabled }: Parameters<typeof In
     if (t) setText(t.transcript);
   }, [samples, initialSample, text]);
 
+  const active = replay && (replay.status === 'playing' || replay.status === 'paused');
   const segments = parseTranscript(text);
 
-  const step = async (i: number) => {
-    const seg = segments[i];
-    if (!seg) return false;
+  const call = async (fn: () => Promise<unknown>) => {
+    setError(null);
     try {
-      await send(seg);
-      setCursor(i + 1);
-      return true;
+      await fn();
     } catch (e) {
       setError((e as Error).message);
-      return false;
     }
   };
+  const start = (paused = false) => api(`/api/sessions/${sessionId}/replay`, { body: { text, speed, paused } });
+  const control = (body: { action?: 'pause' | 'resume' | 'step' | 'stop'; speed?: number }) => api(`/api/sessions/${sessionId}/replay/control`, { body });
 
-  const play = async () => {
-    setError(null);
-    setPlaying(true);
-    playingRef.current = true;
-    let i = cursor;
-    while (playingRef.current && i < segments.length) {
-      // Pace roughly like speech: longer utterances take longer to say.
-      const gap = Math.min(4000, Math.max(800, segments[i]!.text.length * 45));
-      if (i > 0) await new Promise((r) => setTimeout(r, gap / speedRef.current));
-      if (!playingRef.current) break;
-      if (!(await step(i))) break;
-      i++;
-    }
-    playingRef.current = false;
-    setPlaying(false);
-  };
-
-  const pause = () => {
-    playingRef.current = false;
-    setPlaying(false);
+  const onSpeed = (v: number) => {
+    setSpeed(v);
+    if (!active) return;
+    if (speedTimer.current) clearTimeout(speedTimer.current);
+    speedTimer.current = setTimeout(() => void call(() => control({ speed: v })), 150);
   };
 
   return (
     <div className="space-y-3 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          className="h-8 min-w-0 flex-1 rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 text-xs"
-          onChange={(e) => {
-            const value = e.target.value === '__demo_followup' ? samples?.demo.resolution : samples?.transcripts.find((x) => x.id === e.target.value)?.transcript;
-            if (value) {
-              setText(value);
-              setCursor(0);
-            }
-          }}
-          defaultValue=""
-          aria-label="Load sample transcript"
-        >
-          <option value="">Load a sample transcript…</option>
-          {samples?.transcripts.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.title}
-            </option>
-          ))}
-          {samples && <option value="__demo_followup">Demo follow-up: the team settles the question</option>}
-        </select>
-      </div>
+      <select
+        className="h-8 w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 text-xs"
+        onChange={(e) => {
+          const value = e.target.value === '__demo_followup' ? samples?.demo.resolution : samples?.transcripts.find((x) => x.id === e.target.value)?.transcript;
+          if (value) setText(value);
+        }}
+        defaultValue=""
+        aria-label="Load sample transcript"
+        disabled={Boolean(active)}
+      >
+        <option value="">Load a sample transcript…</option>
+        {samples?.transcripts.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.title}
+          </option>
+        ))}
+        {samples && <option value="__demo_followup">Demo follow-up: the team settles the question</option>}
+      </select>
       <Textarea
         rows={7}
         value={text}
-        onChange={(e) => {
-          setText(e.target.value);
-          setCursor(0);
-        }}
+        onChange={(e) => setText(e.target.value)}
+        readOnly={Boolean(active)}
         placeholder={'Priya (PO): We need a way to undo approvals.\nSam (Developer): I’ll set the status back to pending.'}
         aria-label="Transcript"
         data-testid="replay-text"
       />
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        {playing ? (
-          <Button size="sm" onClick={pause}>
+        {replay?.status === 'playing' ? (
+          <Button size="sm" onClick={() => call(() => control({ action: 'pause' }))} data-testid="replay-pause">
             Pause
           </Button>
+        ) : replay?.status === 'paused' ? (
+          <Button size="sm" variant="primary" onClick={() => call(() => control({ action: 'resume' }))} data-testid="replay-play">
+            Resume
+          </Button>
         ) : (
-          <Button size="sm" variant="primary" disabled={disabled || cursor >= segments.length} onClick={play} data-testid="replay-play">
-            {cursor > 0 ? 'Resume' : 'Play'}
+          <Button size="sm" variant="primary" disabled={disabled || segments.length === 0} onClick={() => call(() => start())} data-testid="replay-play">
+            Play
           </Button>
         )}
-        <Button size="sm" disabled={disabled || playing || cursor >= segments.length} onClick={() => step(cursor)}>
+        <Button
+          size="sm"
+          disabled={disabled || replay?.status === 'playing' || (!active && segments.length === 0)}
+          onClick={() => call(() => (active ? control({ action: 'step' }) : start(true).then(() => control({ action: 'step' }))))}
+          title="Send the next turn now"
+        >
           Step
         </Button>
+        {active && (
+          <Button size="sm" variant="ghost" onClick={() => call(() => control({ action: 'stop' }))}>
+            Stop
+          </Button>
+        )}
         <label className="ml-1 flex items-center gap-1.5 text-[var(--color-muted)]">
           Speed
-          <input type="range" min={0.5} max={20} step={0.5} value={speed} onChange={(e) => setSpeed(Number(e.target.value))} />
+          <input type="range" min={0.5} max={20} step={0.5} value={speed} onChange={(e) => onSpeed(Number(e.target.value))} aria-label="Replay speed" />
           <span className="w-8 tabular-nums">{speed}×</span>
         </label>
-        <span className="ml-auto tabular-nums text-[var(--color-muted)]" data-testid="replay-progress">
-          {cursor}/{segments.length} segments
+        <span className="ml-auto flex items-center gap-2 tabular-nums text-[var(--color-muted)]" data-testid="replay-progress">
+          {replay && <Badge tone={STATUS_TONE[replay.status]}>{replay.status}</Badge>}
+          {replay && replay.status !== 'stopped' ? `${replay.delivered}/${replay.total}` : `0/${segments.length}`} segments
         </span>
       </div>
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {(error || replay?.error) && <p className="text-xs text-red-600">{error ?? replay?.error}</p>}
+      <p className="text-[11px] text-[var(--color-muted)]">Replays run on the server, paced like speech, and feed the same pipeline as live transcription.</p>
     </div>
   );
 }
 
-function Live({ send, sessionId, speakers, disabled }: Parameters<typeof InputPanel>[0]) {
+function Live({ send, sessionId, speakers, disabled }: Props) {
   const [speaker, setSpeaker] = useState('');
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -174,9 +183,9 @@ function Live({ send, sessionId, speakers, disabled }: Parameters<typeof InputPa
       </div>
       {error && <p className="text-xs text-red-600">{error}</p>}
       <p className="text-[11px] leading-relaxed text-[var(--color-muted)]">
-        External transcription can stream into this session:{' '}
+        External transcription can stream into this session (send an <code>externalId</code> to make retries safe):{' '}
         <code className="break-all">
-          POST {API_URL}/api/sessions/{sessionId}/segments {'{"speaker","text","timestamp"}'}
+          POST {API_URL}/api/sessions/{sessionId}/segments {'{"speaker","text","timestamp","externalId"}'}
         </code>
       </p>
     </form>

@@ -38,7 +38,7 @@ function Copilot() {
   if (error) return <Card className="p-6 text-sm">Could not load session: {error}</Card>;
   if (!data) return <p className="text-sm text-[var(--color-muted)]">Loading…</p>;
 
-  const { state, segments, session, repo } = data;
+  const { state, segments, session, repo, metrics } = data;
   const ended = session.status === 'ended';
   const name = (pid: string) => state.participants.find((p) => p.id === pid);
 
@@ -119,6 +119,7 @@ function Copilot() {
               initialSample={search.get('sample') ?? undefined}
               speakers={state.participants.filter((p) => !p.id.startsWith('prior:')).map((p) => p.displayName)}
               disabled={ended}
+              replay={data.replay}
             />
           )}
         </section>
@@ -189,10 +190,16 @@ function Copilot() {
                 </Field>
               )}
               <Field label="Engine activity">
-                <span className="text-xs text-[var(--color-muted)]">
-                  {state.metrics.analysesRun} analyses · {state.metrics.analysesSkipped} turns skipped · {state.metrics.retrievals} retrievals · {state.metrics.candidatesRejected} candidates
-                  rejected by the evidence check
-                </span>
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-[var(--color-muted)]" data-testid="engine-metrics">
+                  <Metric label="Meeting time" value={formatTime(metrics.meetingDurationMs)} />
+                  <Metric label="Analyses / skipped turns" value={`${metrics.analysesRun} / ${metrics.analysesSkipped}`} />
+                  <Metric label="Retrievals (cached)" value={`${metrics.retrievals} (${metrics.retrievalCacheHits})`} />
+                  <Metric label="Rejected by evidence check" value={metrics.rejectedCandidates} />
+                  <Metric label="Suggestions shown" value={metrics.suggestions} />
+                  <Metric label="Duplicates suppressed" value={state.metrics.duplicatesSuppressed + metrics.duplicateSegments} />
+                  <Metric label="Latency p50 / p95" value={metrics.latencyMs ? `${metrics.latencyMs.p50} / ${metrics.latencyMs.p95} ms` : '—'} />
+                  <Metric label="Median time to resolve" value={metrics.medianTimeToResolveMs === null ? '—' : formatTime(metrics.medianTimeToResolveMs)} />
+                </dl>
               </Field>
             </div>
           </Card>
@@ -238,13 +245,32 @@ function Copilot() {
             <div className="space-y-2 pt-2">
               <h3 className="text-xs font-medium text-[var(--color-muted)]">Settled</h3>
               {done.map((d) => (
-                <SuggestionCard key={d.id} sessionId={id} d={d} clarifications={state.clarifications.filter((c) => c.discrepancyId === d.id)} participants={state.participants} act={act} respond={respond} readOnly />
+                <SuggestionCard
+                  key={d.id}
+                  sessionId={id}
+                  d={d}
+                  clarifications={state.clarifications.filter((c) => c.discrepancyId === d.id)}
+                  participants={state.participants}
+                  act={act}
+                  respond={respond}
+                  readOnly
+                  canRate={!ended}
+                />
               ))}
             </div>
           )}
         </section>
       </div>
     </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd className="text-right tabular-nums text-[var(--color-ink)]">{value}</dd>
+    </>
   );
 }
 

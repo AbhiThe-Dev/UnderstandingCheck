@@ -64,13 +64,57 @@ describe('API end to end (heuristic analyzer, in-memory Postgres)', () => {
     expect(more.status).toBe(409);
 
     const usage = await call('GET', '/api/usage');
-    expect(usage.body.bySession.find((s: any) => s.id === id)).toMatchObject({ suggestions: 1, confirmedMisunderstandings: 1, costUsd: 0 });
+    expect(usage.body.bySession.find((s: any) => s.id === id)).toMatchObject({ metrics: { suggestions: 1, resolvedInMeetingRate: 1 }, confirmedMisunderstandings: 1, costUsd: 0 });
   });
 
   it('validates segments and rejects unknown sessions', async () => {
     expect((await call('POST', '/api/sessions/00000000-0000-0000-0000-000000000000/segments', { speaker: 'A', text: 'hi' })).status).toBe(404);
     const { body } = await call('POST', '/api/demo');
     expect((await call('POST', `/api/sessions/${body.id}/segments`, { speaker: '', text: '' })).status).toBe(400);
+  });
+
+  it('runs a server-side replay that feeds the live pipeline, with controls', async () => {
+    const { body } = await call('POST', '/api/demo');
+    const id = body.id as string;
+    const started = await call('POST', `/api/sessions/${id}/replay`, { text: SEEDED_DEMO.transcript, speed: 50 });
+    expect(started.status).toBe(202);
+    expect(started.body).toMatchObject({ status: 'playing', total: 4 });
+    expect((await call('POST', `/api/sessions/${id}/replay`, { text: SEEDED_DEMO.transcript })).status).toBe(409);
+
+    const deadline = Date.now() + 5000;
+    let view: Record<string, any> = {};
+    while (Date.now() < deadline) {
+      view = (await call('GET', `/api/sessions/${id}`)).body;
+      if (view.replay?.status === 'finished') break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(view.replay).toMatchObject({ status: 'finished', delivered: 4, total: 4 });
+    expect(view.segments).toHaveLength(4);
+    expect(view.state.discrepancies.some((d: any) => d.category === 'false_alignment' && d.visibility === 'live')).toBe(true);
+    expect(view.metrics.suggestions).toBe(1);
+
+    // Replaying the identical finished transcript would duplicate the meeting.
+    expect((await call('POST', `/api/sessions/${id}/replay`, { text: SEEDED_DEMO.transcript, speed: 50 })).status).toBe(409);
+
+    // A follow-up replay continues the meeting clock instead of restarting at 00:00.
+    await call('POST', `/api/sessions/${id}/replay`, { text: SEEDED_DEMO_RESOLUTION, speed: 1, paused: true });
+    const stepped = await call('POST', `/api/sessions/${id}/replay/control`, { action: 'step', speed: 2 });
+    expect(stepped.body).toMatchObject({ status: 'paused', speed: 2 });
+    await new Promise((r) => setTimeout(r, 300));
+    view = (await call('GET', `/api/sessions/${id}`)).body;
+    expect(view.segments).toHaveLength(5);
+    expect(view.segments[4].timestamp).toBeGreaterThan(view.segments[3].timestamp);
+    expect((await call('POST', `/api/sessions/${id}/replay/control`, { action: 'stop' })).body.status).toBe('stopped');
+    expect((await call('POST', `/api/sessions/${id}/replay/control`, {})).status).toBe(400);
+  });
+
+  it('accepts retried live segments only once', async () => {
+    const { body } = await call('POST', '/api/demo');
+    const seg = { speaker: 'Priya', text: 'Admins need to be able to undo an approval.', externalId: 'zoom-123' };
+    await call('POST', `/api/sessions/${body.id}/segments`, seg);
+    const retry = await call('POST', `/api/sessions/${body.id}/segments`, seg);
+    expect(retry.body.events).toEqual([{ type: 'duplicate_segment', externalId: 'zoom-123' }]);
+    expect(retry.body.segments).toHaveLength(1);
   });
 
   it('processes an uploaded transcript and deletes the session on request', async () => {

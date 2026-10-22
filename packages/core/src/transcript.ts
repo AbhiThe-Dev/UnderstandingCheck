@@ -42,3 +42,11 @@ export function parseTranscript(text: string): TranscriptSegmentInput[] {
   }
   return out;
 }
+
+/**
+ * Roughly how long it takes to say a segment, for pacing replays when the transcript has no
+ * timestamps: ~45 ms per character, clamped to 0.8–4 s.
+ */
+export function speechGapMs(text: string): number {
+  return Math.min(4000, Math.max(800, text.length * 45));
+}

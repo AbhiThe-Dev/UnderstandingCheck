@@ -11,6 +11,7 @@ export * from './tracker';
 export * from './engine';
 export * from './summary';
 export * from './transcript';
+export * from './metrics';
 export { HeuristicAnalyzer, interpretResponseHeuristic } from './analyzers/heuristic';
 export { LlmAnalyzer, type LlmAnalyzerOptions } from './analyzers/llm';
 export { redactSecrets, SYSTEM_BASE } from './analyzers/prompts';

@@ -39,7 +39,10 @@ export interface SessionInit {
   priorDecisions?: PriorDecision[];
 }
 
-export type DiscrepancyAction = 'ask_now' | 'dismiss' | 'save_for_later' | 'restore';
+export type DiscrepancyAction = 'ask_now' | 'dismiss' | 'save_for_later' | 'restore' | 'mark_useful' | 'mark_not_useful';
+
+/** How many recent ingest latencies to keep for percentile reporting. */
+const LATENCY_SAMPLES = 500;
 
 /** More specific categories win when two rules describe the same underlying ambiguity. */
 const CATEGORY_RANK: Record<DiscrepancyCategory, number> = {
@@ -166,6 +169,25 @@ export class SessionEngine {
   }
 
   async ingest(input: TranscriptSegmentInput): Promise<EngineEvent[]> {
+    if (input.externalId) {
+      const seen = (this.state.externalIds ??= []);
+      if (seen.includes(input.externalId)) {
+        this.state.metrics.duplicateSegments = (this.state.metrics.duplicateSegments ?? 0) + 1;
+        return [{ type: 'duplicate_segment', externalId: input.externalId }];
+      }
+      seen.push(input.externalId);
+    }
+    const started = performance.now();
+    try {
+      return await this.ingestSegment(input);
+    } finally {
+      const samples = (this.state.metrics.latencyMs ??= []);
+      samples.push(Math.round((performance.now() - started) * 100) / 100);
+      if (samples.length > LATENCY_SAMPLES) samples.splice(0, samples.length - LATENCY_SAMPLES);
+    }
+  }
+
+  private async ingestSegment(input: TranscriptSegmentInput): Promise<EngineEvent[]> {
     const events: EngineEvent[] = [];
     const participant = this.resolveParticipant(input.speaker, input.role, events);
     const last = this.segments.at(-1);
@@ -299,6 +321,12 @@ export class SessionEngine {
         d.visibility = 'live';
         d.surfacedAtSegmentIndex ??= at;
         await this.prepareClarifications(d, events);
+        break;
+      case 'mark_useful':
+        d.feedback = 'useful';
+        break;
+      case 'mark_not_useful':
+        d.feedback = 'not_useful';
         break;
     }
     events.push({ type: 'discrepancy_updated', discrepancy: d, note: action });

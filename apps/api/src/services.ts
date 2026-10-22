@@ -13,6 +13,7 @@ import { PgSymbolSearch, WorkspaceStore, ensureDemoWorkspace, openDatabase, type
 import { SAMPLE_REPOS, sampleRepoPath, type RepoName } from '@uc/fixtures';
 import { indexDirectory } from '@uc/indexer';
 import { createLlmProviderFromEnv } from '@uc/providers';
+import { ReplayManager } from './replay';
 
 export type AnalyzerMode = 'heuristic' | 'llm';
 
@@ -38,11 +39,14 @@ export class Services {
   private engines = new Map<string, SessionEngine>();
   private queues = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<Listener>>();
+  readonly replays: ReplayManager;
 
   private constructor(
     readonly store: WorkspaceStore,
     readonly analyzerMode: AnalyzerMode,
-  ) {}
+  ) {
+    this.replays = new ReplayManager(this, (status, message) => new HttpError(status, message));
+  }
 
   static async create(opts: ServicesOptions = {}): Promise<Services> {
     const { db } = await openDatabase(opts.dataDir);
@@ -174,6 +178,15 @@ export class Services {
     return { state: engine.state, segments: engine.segments, status: row.status, row };
   }
 
+  /** Re-broadcast the current snapshot (e.g. replay paused or sped up) without running the engine. */
+  notify(id: string) {
+    const set = this.listeners.get(id);
+    const engine = this.engines.get(id);
+    if (!set?.size || !engine) return;
+    const snapshot: SessionSnapshot = { state: engine.state, segments: engine.segments, status: engine.state.ended ? 'ended' : 'active' };
+    for (const l of set) l(snapshot, []);
+  }
+
   subscribe(id: string, l: Listener): () => void {
     let set = this.listeners.get(id);
     if (!set) this.listeners.set(id, (set = new Set()));
@@ -182,6 +195,7 @@ export class Services {
   }
 
   async deleteSession(id: string) {
+    this.replays.forget(id);
     await this.store.deleteSession(id);
     this.engines.delete(id);
     this.listeners.delete(id);

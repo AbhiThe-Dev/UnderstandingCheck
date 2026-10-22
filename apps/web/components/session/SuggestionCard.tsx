@@ -1,12 +1,13 @@
 'use client';
 
 import Link from 'next/link';
+import { ThumbsDown, ThumbsUp } from 'lucide-react';
 import { useState } from 'react';
 import type { Clarification, Discrepancy, Participant } from '@uc/core';
 import { Badge, Button } from '@/components/ui/primitives';
 import { CATEGORY_LABEL, STATUS_LABEL, cn } from '@/lib/utils';
 
-export type Act = (discrepancyId: string, action: 'ask_now' | 'dismiss' | 'save_for_later' | 'restore') => Promise<void>;
+export type Act = (discrepancyId: string, action: 'ask_now' | 'dismiss' | 'save_for_later' | 'restore' | 'mark_useful' | 'mark_not_useful') => Promise<void>;
 export type Respond = (clarificationId: string, participantId: string, body: { interpretationId?: string; text?: string }) => Promise<void>;
 
 const STATUS_TONE: Partial<Record<Discrepancy['status'], 'amber' | 'green' | 'red' | 'blue' | 'accent'>> = {
@@ -25,6 +26,8 @@ export function SuggestionCard(props: {
   act: Act;
   respond: Respond;
   readOnly: boolean;
+  /** Rating stays possible after a concern settles, until the session ends. */
+  canRate?: boolean;
 }) {
   const { d, clarifications, participants, sessionId } = props;
   const name = (id: string | null) => participants.find((p) => p.id === id)?.displayName ?? 'Someone';
@@ -97,7 +100,24 @@ export function SuggestionCard(props: {
             Dismiss
           </Button>
         )}
-        <Link href={`/sessions/${sessionId}/d/${d.id}`} className="ml-auto">
+        <span className="ml-auto flex items-center gap-0.5 text-[11px] text-[var(--color-muted)]" aria-label="Was this useful?">
+          {d.feedback ? (
+            <span data-testid="feedback-given">{d.feedback === 'useful' ? 'Marked useful' : 'Marked not useful'}</span>
+          ) : (
+            (props.canRate ?? !props.readOnly) && (
+              <>
+                Useful?
+                <Button size="sm" variant="ghost" onClick={() => props.act(d.id, 'mark_useful')} aria-label="Useful" data-testid="mark-useful">
+                  <ThumbsUp className="size-3.5" />
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => props.act(d.id, 'mark_not_useful')} aria-label="Not useful">
+                  <ThumbsDown className="size-3.5" />
+                </Button>
+              </>
+            )
+          )}
+        </span>
+        <Link href={`/sessions/${sessionId}/d/${d.id}`}>
           <Button size="sm" variant="ghost">
             Evidence →
           </Button>

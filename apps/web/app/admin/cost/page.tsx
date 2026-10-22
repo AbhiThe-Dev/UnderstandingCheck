@@ -1,9 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import type { SessionMetrics } from '@uc/core';
 import { Badge, Button, Card, CardHeader, CardTitle, Empty, Input, Label } from '@/components/ui/primitives';
 import { api } from '@/lib/api';
-import { usd } from '@/lib/utils';
+import { formatTime, usd } from '@/lib/utils';
+
+const pct = (n: number | null | undefined) => (n === null || n === undefined ? '—' : `${Math.round(n * 100)}%`);
+const money = (n: number | null) => (n === null ? '—' : usd(n));
 
 interface Usage {
   analyzer: string;
@@ -18,15 +22,11 @@ interface Usage {
     inputTokens: number;
     outputTokens: number;
     costUsd: number;
-    segments: number;
-    analyses: number;
-    skipped: number;
-    retrievals: number;
-    cacheHits: number;
-    suggestions: number;
-    dismissed: number;
+    metrics: SessionMetrics | null;
     confirmedMisunderstandings: number;
+    costPerMeetingHour: number | null;
     costPerSuggestion: number | null;
+    costPerUsefulSuggestion: number | null;
     costPerConfirmedMisunderstanding: number | null;
   }[];
   byOperation: { operation: string; model: string; calls: number; inputTokens: number; outputTokens: number; costUsd: number }[];
@@ -113,28 +113,55 @@ export default function CostPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>By session</CardTitle>
+          <CardTitle>By session — economics</CardTitle>
         </CardHeader>
         {data.bySession.length === 0 ? (
           <Empty>No sessions yet.</Empty>
         ) : (
           <Table
-            head={['Session', 'Segments', 'Analyses', 'Skipped', 'Retrievals (cached)', 'Model calls', 'Tokens in/out', 'Cost', 'Suggestions', 'Dismissed', 'Confirmed misunderstandings', 'Cost / suggestion', 'Cost / confirmed']}
+            head={['Session', 'Meeting time', 'Model calls', 'Tokens in/out', 'Cost', 'Cost / meeting hour', 'Cost / suggestion', 'Cost / useful', 'Cost / confirmed misunderstanding']}
             rows={data.bySession.map((s) => [
               s.title,
-              s.segments,
-              s.analyses,
-              s.skipped,
-              `${s.retrievals} (${s.cacheHits})`,
+              s.metrics ? formatTime(s.metrics.meetingDurationMs) : '—',
               s.calls,
               `${tokens(s.inputTokens)} / ${tokens(s.outputTokens)}`,
               usd(s.costUsd),
-              s.suggestions,
-              s.dismissed,
-              s.confirmedMisunderstandings,
-              s.costPerSuggestion === null ? '—' : usd(s.costPerSuggestion),
-              s.costPerConfirmedMisunderstanding === null ? '—' : usd(s.costPerConfirmedMisunderstanding),
+              money(s.costPerMeetingHour),
+              money(s.costPerSuggestion),
+              money(s.costPerUsefulSuggestion),
+              money(s.costPerConfirmedMisunderstanding),
             ])}
+          />
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>By session — quality &amp; friction</CardTitle>
+        </CardHeader>
+        {data.bySession.length === 0 ? (
+          <Empty>No sessions yet.</Empty>
+        ) : (
+          <Table
+            head={['Session', 'Segments', 'Analyses / skipped', 'Retrievals (cached)', 'Suggestions', 'Per hour', 'Revealed a difference', 'Resolved in meeting', 'Rated useful', 'Dismissed', 'Median time to resolve', 'Latency p95']}
+            rows={data.bySession.map((s) => {
+              const m = s.metrics;
+              if (!m) return [s.title, '—', '—', '—', '—', '—', '—', '—', '—', '—', '—', '—'];
+              return [
+                s.title,
+                m.segments,
+                `${m.analysesRun} / ${m.analysesSkipped}`,
+                `${m.retrievals} (${m.retrievalCacheHits})`,
+                m.suggestions,
+                m.suggestionsPerHour === null ? '—' : m.suggestionsPerHour.toFixed(1),
+                pct(m.revealedDifferenceRate),
+                pct(m.resolvedInMeetingRate),
+                m.rated ? `${pct(m.usefulRate)} of ${m.rated}` : '—',
+                pct(m.dismissalRate),
+                m.medianTimeToResolveMs === null ? '—' : formatTime(m.medianTimeToResolveMs),
+                m.latencyMs ? `${m.latencyMs.p95} ms` : '—',
+              ];
+            })}
           />
         )}
       </Card>

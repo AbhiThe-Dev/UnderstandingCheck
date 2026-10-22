@@ -8,10 +8,16 @@ test('seeded demo: suspected false alignment → private checks → confirmed di
   await page.getByTestId('start-demo').click();
   await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]+\?sample=demo-undo-approval/);
 
-  // Replay the meeting at maximum speed.
-  await page.locator('input[type=range]').fill('20');
+  // Server-side replay at maximum speed.
+  await page.getByLabel('Replay speed').fill('20');
   await page.getByTestId('replay-play').click();
-  await expect(page.getByTestId('replay-progress')).toHaveText('4/4 segments', { timeout: 20_000 });
+  await expect(page.getByTestId('replay-progress')).toContainText('finished', { timeout: 20_000 });
+  await expect(page.getByTestId('replay-progress')).toContainText('4/4 segments');
+  await expect(page.getByTestId('transcript')).toContainText('Sounds good.');
+
+  // Replaying the same finished transcript again is refused rather than duplicating the meeting.
+  await page.getByTestId('replay-play').click();
+  await expect(page.getByText('already replayed in this session')).toBeVisible();
 
   // Exactly one quiet suggestion: suspected, not claimed, disagreement.
   const card = page.getByTestId('suggestion');
@@ -28,10 +34,18 @@ test('seeded demo: suspected false alignment → private checks → confirmed di
   await expect(card).toContainText('Different expectations confirmed');
   await expect(page.getByTestId('suggested-question')).toContainText("should the applicant's access also be revoked?");
 
-  // The team settles it in conversation.
+  // The team settles it in conversation; step through it one turn at a time.
   await page.getByTestId('replay-text').fill(FOLLOW_UP);
-  await page.getByTestId('replay-play').click();
-  await expect(page.getByText('Decided: Undoing the approval also revokes the access')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: 'Step' }).click();
+  await expect(page.getByTestId('replay-progress')).toContainText('paused');
+  await expect(page.getByTestId('replay-progress')).toContainText('1/2 segments');
+  await page.getByTestId('replay-play').click(); // resume
+  await expect(page.getByTestId('replay-progress')).toContainText('finished', { timeout: 20_000 });
+  await expect(page.getByText('Decided: Undoing the approval also revokes the access')).toBeVisible();
+
+  await page.getByTestId('mark-useful').click();
+  await expect(page.getByTestId('feedback-given')).toHaveText('Marked useful');
+  await expect(page.getByTestId('engine-metrics')).toContainText('Suggestions shown');
 
   await page.getByTestId('end-session').click();
   await expect(page).toHaveURL(/\/summary$/);
