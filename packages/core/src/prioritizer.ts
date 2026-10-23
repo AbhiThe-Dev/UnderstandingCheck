@@ -3,6 +3,7 @@ import { CONSEQUENCE_WEIGHT } from './lexicon';
 import type { Discrepancy, SessionState } from './types';
 
 const TERMINAL = new Set(['resolved', 'dismissed', 'unresolved', 'confirmed']);
+const IDENTITY_DEPENDENT = new Set<Discrepancy['category']>(['false_alignment', 'direct_disagreement']);
 
 export interface ScoreBreakdown {
   consequence: number;
@@ -30,9 +31,11 @@ export function scoreDiscrepancy(
   // lastLinkedSegmentIndex starts at the creation segment and advances when the topic comes back.
   const relevance = currentSegmentIndex - d.lastLinkedSegmentIndex <= recentWindow ? 1 : 0.5;
 
-  const ambiguous = d.statements.some(
-    (q) => state.participants.find((p) => p.id === q.participantId)?.ambiguous,
-  );
+  // Only suggestions about who said what depend on knowing the speaker. A gap in the spec or a conflict
+  // with the code is just as true whoever raised it.
+  const ambiguous =
+    IDENTITY_DEPENDENT.has(d.category) &&
+    d.statements.some((q) => state.participants.find((p) => p.id === q.participantId)?.ambiguous);
   const base =
     (w.consequence * consequence +
       w.codeEvidence * codeEvidence +

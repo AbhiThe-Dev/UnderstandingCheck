@@ -50,7 +50,7 @@ export class RecallClient {
         recording_config: {
           // Low-latency mode only supports English, and Recall rejects the upload unless that is explicit.
           transcript: { provider: { recallai_streaming: { mode: 'prioritize_low_latency', language_code: 'en' } } },
-          realtime_endpoints: [{ type: 'desktop_sdk_callback', events: ['transcript.data', 'transcript.partial_data'] }],
+          realtime_endpoints: [{ type: 'desktop_sdk_callback', events: ['transcript.data', 'transcript.partial_data', 'participant_events.join', 'participant_events.leave'] }],
         },
         metadata,
       },
@@ -119,6 +119,25 @@ export function parseRecallTranscript(evt: { event?: string; data?: unknown }): 
     endMs: toMs(words.at(-1)?.end_timestamp?.relative ?? undefined),
   };
 }
+
+/**
+ * Who joined or left, from a Desktop SDK `participant_events.join` / `.leave`. On the desktop Recall
+ * attributes speech by audio stream ("Host" = this computer's microphone, "Guest" = everything the call
+ * plays), so those two stream labels are not people and are left out.
+ */
+export function parseRecallParticipantEvent(evt: { event?: string; data?: unknown }): { kind: 'join' | 'leave'; id: string; name: string } | null {
+  if (evt.event !== 'participant_events.join' && evt.event !== 'participant_events.leave') return null;
+  const outer = (evt.data ?? {}) as { data?: unknown };
+  const payload = ((outer.data && typeof outer.data === 'object' ? outer.data : outer) ?? {}) as {
+    participant?: { id?: number | string; name?: string | null } | null;
+  };
+  const name = payload.participant?.name?.trim();
+  if (!name || payload.participant?.id === undefined || RECALL_STREAM_LABELS.has(name)) return null;
+  return { kind: evt.event === 'participant_events.join' ? 'join' : 'leave', id: String(payload.participant.id), name };
+}
+
+/** Recall's per-stream speaker labels on the desktop. */
+export const RECALL_STREAM_LABELS = new Set(['Host', 'Guest']);
 
 /** A final Recall utterance as an engine segment, with an id stable across resends. */
 export function recallSegment(t: RecallTranscript, uploadId: string, baseTimestampMs = 0): TranscriptSegmentInput {

@@ -1,5 +1,5 @@
 import { transcriptionPricesFrom } from '@uc/core';
-import { parseRecallTranscript, recallSegment, type LiveTranscriber, type RecallClient } from '@uc/providers';
+import { parseRecallParticipantEvent, parseRecallTranscript, recallSegment, type LiveTranscriber, type RecallClient } from '@uc/providers';
 import type { HttpError as HttpErrorType, Services } from './services';
 
 export interface CaptureInfo {
@@ -15,6 +15,10 @@ export interface CaptureInfo {
   partial: { speaker: string; text: string } | null;
   /** Microphone only: who the next utterances are attributed to. */
   speaker: string | null;
+  /** Recall only: the person at this computer, whose microphone Recall labels "Host". */
+  localName: string | null;
+  /** Recall only: everyone else in the call, from Recall's join and leave events. */
+  remoteParticipants: string[];
   meeting: { title?: string; platform?: string } | null;
   error: string | null;
   audioSeconds: number;
@@ -41,7 +45,7 @@ type MakeError = (status: 400 | 404 | 409 | 422 | 503, message: string) => HttpE
  * Capture only ever starts from an explicit user action with consent confirmed.
  */
 export class CaptureManager {
-  private captures = new Map<string, CaptureInfo & { uploadId?: string; baseTimestampMs: number }>();
+  private captures = new Map<string, CaptureInfo & { uploadId?: string; baseTimestampMs: number; roster?: Map<string, string> }>();
 
   constructor(
     private services: Services,
@@ -60,7 +64,7 @@ export class CaptureManager {
   status(sessionId: string): CaptureInfo | null {
     const c = this.captures.get(sessionId);
     if (!c) return null;
-    const { uploadId: _u, baseTimestampMs: _b, ...info } = c;
+    const { uploadId: _u, baseTimestampMs: _b, roster: _r, ...info } = c;
     return info;
   }
 
@@ -69,7 +73,7 @@ export class CaptureManager {
     if (snap.status === 'ended') throw this.makeError(409, 'Session has ended');
     if (this.captures.get(sessionId)?.status === 'live') throw this.makeError(409, 'Capture is already running for this session; stop it first');
     const last = snap.segments.at(-1);
-    const info: CaptureInfo & { uploadId?: string; baseTimestampMs: number } = {
+    const info: CaptureInfo & { uploadId?: string; baseTimestampMs: number; roster?: Map<string, string> } = {
       source,
       status: 'live',
       startedAt: new Date().toISOString(),
@@ -78,6 +82,8 @@ export class CaptureManager {
       duplicates: 0,
       partial: null,
       speaker: null,
+      localName: null,
+      remoteParticipants: [],
       meeting: null,
       error: null,
       audioSeconds: 0,
@@ -92,9 +98,10 @@ export class CaptureManager {
 
   // ---------------- Recall.ai (meeting calls)
 
-  async startRecall(sessionId: string, meeting: { title?: string; platform?: string } | null) {
+  async startRecall(sessionId: string, meeting: { title?: string; platform?: string } | null, localName: string | null = null) {
     if (!this.deps.recall) throw this.makeError(503, 'Recall.ai is not configured (set RECALL_API_KEY and RECALL_REGION)');
-    const info = await this.begin(sessionId, 'recall', { meeting });
+    const info = await this.begin(sessionId, 'recall', { meeting, localName });
+    info.roster = new Map();
     try {
       const upload = await this.deps.recall.createSdkUpload({ uc_session_id: sessionId });
       info.uploadId = upload.id;
@@ -110,8 +117,17 @@ export class CaptureManager {
   async recallEvent(sessionId: string, evt: { event?: string; data?: unknown }) {
     const info = this.captures.get(sessionId);
     if (!info || info.source !== 'recall' || !info.uploadId) throw this.makeError(409, 'No Recall capture is running for this session');
-    const t = parseRecallTranscript(evt);
-    if (!t) return { accepted: false as const };
+    const p = parseRecallParticipantEvent(evt);
+    if (p) {
+      if (p.kind === 'join') info.roster!.set(p.id, p.name);
+      else info.roster!.delete(p.id);
+      info.remoteParticipants = this.remotes(info);
+      this.services.notify(sessionId);
+      return { accepted: true as const, partial: false };
+    }
+    const parsed = parseRecallTranscript(evt);
+    if (!parsed) return { accepted: false as const };
+    const t = { ...parsed, speaker: this.speakerFor(info, parsed.speaker) };
     if (!t.final) {
       info.partial = { speaker: t.speaker, text: t.text };
       this.services.notify(sessionId);
@@ -123,6 +139,24 @@ export class CaptureManager {
     else info.segments++;
     this.services.notify(sessionId);
     return { accepted: true as const, partial: false };
+  }
+
+  /**
+   * On the desktop Recall labels speech by audio stream, not by person: "Host" is this computer's
+   * microphone and "Guest" is everything the call plays. Name them from what is known: the local user,
+   * and the other participant when there is exactly one. With several, "Others" (who said what among
+   * them is unknown, which the engine accounts for).
+   */
+  private speakerFor(info: CaptureInfo, label: string): string {
+    if (label === 'Host') return info.localName ?? label;
+    if (label !== 'Guest') return label;
+    const remotes = info.remoteParticipants;
+    return remotes.length === 1 ? remotes[0]! : remotes.length > 1 ? 'Others' : label;
+  }
+
+  private remotes(info: CaptureInfo & { roster?: Map<string, string> }) {
+    const local = info.localName?.toLowerCase();
+    return [...new Set(info.roster?.values() ?? [])].filter((n) => n.toLowerCase() !== local);
   }
 
   stop(sessionId: string, error?: string) {

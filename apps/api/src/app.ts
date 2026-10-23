@@ -293,10 +293,13 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
         consentConfirmed: z.literal(true, { error: 'Participants must be told the meeting is recorded and transcribed' }),
         // Recall reports a missing title or platform as null (e.g. Google Meet before its title is known).
         meeting: z.object({ title: z.string().max(300).nullish(), platform: z.string().max(60).nullish() }).nullish(),
+        /** The person at this computer, as they appear in the call. */
+        localName: z.string().trim().min(1).max(120).nullish(),
       }),
     );
     const m = body.meeting;
-    return c.json(await services.capture.startRecall(c.req.param('id'), m ? { title: m.title ?? undefined, platform: m.platform ?? undefined } : null), 201);
+    const meeting = m ? { title: m.title ?? undefined, platform: m.platform ?? undefined } : null;
+    return c.json(await services.capture.startRecall(c.req.param('id'), meeting, body.localName ?? null), 201);
   });
 
   /** Desktop app: forward Recall `realtime-event`s (one or a batch). Resends are ignored. */

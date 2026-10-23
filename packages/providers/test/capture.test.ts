@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket as ServerSocket } from 'ws';
-import { OpenAiLiveTranscriber, RecallClient, parseRecallTranscript, recallSegment } from '../src';
+import { OpenAiLiveTranscriber, RecallClient, parseRecallParticipantEvent, parseRecallTranscript, recallSegment } from '../src';
 
 const transcriptEvent = (event: string, words: string[], participant: { id: number; name: string | null }, start = 12.5) => ({
   event,
@@ -33,6 +33,15 @@ describe('Recall transcript events', () => {
     expect(parseRecallTranscript(transcriptEvent('transcript.data', [' '], { id: 1, name: 'A' }))).toBeNull();
   });
 
+  it('reads who joined or left, ignoring the per-stream "Host" and "Guest" labels', () => {
+    const ev = (event: string, participant: unknown) => ({ event, data: { data: { participant } } });
+    expect(parseRecallParticipantEvent(ev('participant_events.join', { id: 0, name: 'Sam ' }))).toEqual({ kind: 'join', id: '0', name: 'Sam' });
+    expect(parseRecallParticipantEvent(ev('participant_events.leave', { id: 0, name: 'Sam' }))).toEqual({ kind: 'leave', id: '0', name: 'Sam' });
+    expect(parseRecallParticipantEvent(ev('participant_events.join', { id: 32767, name: 'Guest' }))).toBeNull();
+    expect(parseRecallParticipantEvent(ev('participant_events.join', { id: 4, name: '' }))).toBeNull();
+    expect(parseRecallParticipantEvent(ev('transcript.data', { id: 0, name: 'Sam' }))).toBeNull();
+  });
+
   it('creates SDK uploads with Recall streaming transcription delivered to the desktop app', async () => {
     let seen: { url: string; init: RequestInit } | null = null;
     const client = new RecallClient({
@@ -49,7 +58,7 @@ describe('Recall transcript events', () => {
     expect(JSON.parse(String(seen!.init.body))).toEqual({
       recording_config: {
         transcript: { provider: { recallai_streaming: { mode: 'prioritize_low_latency', language_code: 'en' } } },
-        realtime_endpoints: [{ type: 'desktop_sdk_callback', events: ['transcript.data', 'transcript.partial_data'] }],
+        realtime_endpoints: [{ type: 'desktop_sdk_callback', events: ['transcript.data', 'transcript.partial_data', 'participant_events.join', 'participant_events.leave'] }],
       },
       metadata: { uc_session_id: 's1' },
     });

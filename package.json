@@ -15,6 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "pnpm --filter @uc/web test:e2e",
+    "test:live-call": "node scripts/live-call-test.mjs",
     "demo": "tsx packages/eval/src/demo.ts",
     "eval": "tsx packages/eval/src/evaluate.ts",
     "eval:live": "ANALYZER=llm tsx packages/eval/src/evaluate.ts",

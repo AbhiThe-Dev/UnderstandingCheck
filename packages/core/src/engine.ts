@@ -53,7 +53,8 @@ const CATEGORY_RANK: Record<DiscrepancyCategory, number> = {
   false_alignment: 5,
 };
 
-const AMBIGUOUS_SPEAKER = /^(unknown|unidentified|speaker\s*\d*|participant\s*\d+|guest|\?+|unattributed)$/i;
+// "Others" is several remote people sharing one audio stream (see the API's Recall capture).
+const AMBIGUOUS_SPEAKER = /^(unknown|unidentified|speaker\s*\d*|participant\s*\d+|guest|others|\?+|unattributed)$/i;
 
 export function emptyState(sessionId: string, commitSha: string): SessionState {
   return {

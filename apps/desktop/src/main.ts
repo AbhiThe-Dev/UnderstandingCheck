@@ -1,4 +1,5 @@
 import { BrowserWindow, Menu, Tray, app, ipcMain, nativeImage, screen, shell } from 'electron';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ForwardQueue, api, type ApiConfig } from './backend';
 
@@ -27,6 +28,8 @@ interface Meeting {
 }
 
 interface State {
+  /** Suggested name for the person at this computer (their macOS full name); editable in the window. */
+  localName: string | null;
   sdk: 'starting' | 'ready' | 'unavailable' | 'error';
   sdkMessage: string | null;
   apiReachable: boolean;
@@ -47,7 +50,16 @@ interface State {
   log: string[];
 }
 
+function macFullName() {
+  try {
+    return execFileSync('id', ['-F'], { encoding: 'utf8' }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 const state: State = {
+  localName: macFullName(),
   sdk: 'starting',
   sdkMessage: null,
   apiReachable: false,
@@ -174,14 +186,14 @@ async function startSdk() {
   push();
 }
 
-async function startCapture(args: { windowId: string; sessionId: string; consentConfirmed: boolean }) {
+async function startCapture(args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null }) {
   if (!sdk || state.sdk !== 'ready') throw new Error(state.sdkMessage ?? 'The Recall SDK is not ready');
   if (!args.consentConfirmed) throw new Error('Confirm that participants know the meeting is recorded and transcribed');
   if (state.recording && ['starting', 'recording'].includes(state.recording.status)) throw new Error('Already recording; stop first');
   const meeting = state.meetings.find((m) => m.id === args.windowId) ?? null;
   const { uploadId, uploadToken } = await api<{ uploadId: string; uploadToken: string }>(cfg, `/api/sessions/${args.sessionId}/capture/recall`, {
     method: 'POST',
-    body: { consentConfirmed: true, meeting: meeting ? { title: meeting.title, platform: meeting.platform } : null },
+    body: { consentConfirmed: true, meeting: meeting ? { title: meeting.title, platform: meeting.platform } : null, localName: args.localName?.trim() || null },
   });
   state.recording = { windowId: args.windowId, sessionId: args.sessionId, uploadId, meeting, status: 'starting', startedAt: new Date().toISOString(), error: null };
   push();
@@ -257,7 +269,7 @@ ipcMain.handle('repos', () => api(cfg, '/api/repos'));
 ipcMain.handle('session:create', (_e, body: { title: string; repositoryId: string | null; featureDescription?: string }) =>
   api(cfg, '/api/sessions', { method: 'POST', body: { ...body, consentConfirmed: true } }),
 );
-ipcMain.handle('capture:start', (_e, args: { windowId: string; sessionId: string; consentConfirmed: boolean }) => startCapture(args));
+ipcMain.handle('capture:start', (_e, args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null }) => startCapture(args));
 ipcMain.handle('capture:stop', () => stopCapture());
 ipcMain.handle('permission', (_e, p: PermissionName) => sdk?.requestPermission(p));
 ipcMain.handle('panel', (_e, sessionId: string) => openPanel(sessionId));

@@ -6,8 +6,28 @@ let selectedMeeting = null;
 
 const PERMISSIONS = ['accessibility', 'screen-capture', 'microphone'];
 
+// Recall hears this computer's microphone as one speaker; this names it. Remembered between launches.
+const YOU_KEY = 'uc.localName';
+function initName(suggested) {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(YOU_KEY);
+  } catch {
+    // storage unavailable: fall back to the suggestion
+  }
+  if (!$('you').value) $('you').value = saved || suggested || '';
+}
+$('you').onchange = () => {
+  try {
+    localStorage.setItem(YOU_KEY, $('you').value.trim());
+  } catch {
+    // not remembered; still used for this capture
+  }
+};
+
 function render(s) {
   current = s;
+  initName(s.localName);
   const rec = s.recording;
   const recording = rec && (rec.status === 'recording' || rec.status === 'starting');
   $('recBadge').innerHTML = recording ? '<span class="rec">REC</span>' : '';
@@ -76,7 +96,7 @@ $('start').onclick = async () => {
       const created = await window.uc.createSession({ title: $('title').value.trim() || m?.title || 'Meeting', repositoryId: $('repo').value || null });
       sessionId = created.id;
     }
-    await window.uc.start({ windowId: selectedMeeting, sessionId, consentConfirmed: $('consent').checked });
+    await window.uc.start({ windowId: selectedMeeting, sessionId, consentConfirmed: $('consent').checked, localName: $('you').value.trim() || null });
     await loadSessions();
     $('session').value = sessionId;
   } catch (err) {

@@ -133,6 +133,44 @@ describe('meeting capture through Recall.ai', () => {
     await call('POST', `/api/sessions/${body.id}/capture/stop`);
   });
 
+  // The desktop SDK labels speech by audio stream: "Host" (this computer's mic) and "Guest" (the call).
+  const joined = (id: number, name: string) => ({ event: 'participant_events.join', data: { data: { participant: { id, name } } } });
+  const roster = (...names: string[]) => [joined(32766, 'Host'), joined(32767, 'Guest'), ...names.map((n, i) => joined(i, n))];
+
+  it('names the stream labels in a 1:1 call: Host is the local user, Guest the one other person', async () => {
+    const { body } = await call('POST', '/api/demo');
+    await call('POST', `/api/sessions/${body.id}/capture/recall`, { consentConfirmed: true, localName: 'Priya' });
+    const r = await call('POST', `/api/sessions/${body.id}/capture/recall/events`, [
+      ...roster('Priya', 'Sam'),
+      utterance('Host', 'Admins need to be able to undo an approval when a reviewer approves the wrong application.', 1),
+      utterance('Guest', "Easy enough, I'll just set the status back to pending.", 9),
+      utterance('Host', 'Sounds good.', 14),
+    ]);
+    expect(r.body.capture).toMatchObject({ localName: 'Priya', remoteParticipants: ['Sam'], segments: 3 });
+    const view = (await call('GET', `/api/sessions/${body.id}`)).body;
+    expect(view.state.participants.map((p: any) => p.displayName)).toEqual(['Priya', 'Sam']);
+    expect(view.state.discrepancies.find((d: any) => d.visibility === 'live')).toMatchObject({ category: 'false_alignment' });
+    await call('POST', `/api/sessions/${body.id}/capture/stop`);
+  });
+
+  it('calls several remote people "Others" and still raises what does not depend on who spoke', async () => {
+    const { body } = await call('POST', '/api/demo');
+    await call('POST', `/api/sessions/${body.id}/capture/recall`, { consentConfirmed: true, localName: 'priya' });
+    const r = await call('POST', `/api/sessions/${body.id}/capture/recall/events`, [
+      ...roster('Priya', 'Sam', 'Lee'),
+      utterance('Guest', 'Admins need to be able to undo an approval when a reviewer approves the wrong application.', 1),
+      utterance('Guest', "Easy enough, I'll just set the status back to pending.", 9),
+      utterance('Guest', 'Sounds good.', 14),
+    ]);
+    expect(r.body.capture.remoteParticipants).toEqual(['Sam', 'Lee']);
+    const view = (await call('GET', `/api/sessions/${body.id}`)).body;
+    expect(view.state.participants).toEqual([expect.objectContaining({ displayName: 'Others', ambiguous: true })]);
+    const live = view.state.discrepancies.filter((d: any) => d.visibility === 'live');
+    expect(live.map((d: any) => d.category)).toEqual(['missing_specification']);
+    expect(live[0].codeRefs[0].filePath).toBe('src/applications/approve.ts');
+    await call('POST', `/api/sessions/${body.id}/capture/stop`);
+  });
+
   it('rejects events for a session that is not capturing', async () => {
     const { body } = await call('POST', '/api/demo');
     expect((await call('POST', `/api/sessions/${body.id}/capture/recall/events`, utterance('A', 'hi there', 1))).status).toBe(409);
