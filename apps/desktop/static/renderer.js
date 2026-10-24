@@ -17,6 +17,20 @@ function initName(suggested) {
   }
   if (!$('you').value) $('you').value = saved || suggested || '';
 }
+const SCREEN_KEY = 'uc.screenContext';
+try {
+  if (localStorage.getItem(SCREEN_KEY) === 'off') $('screenContext').checked = false;
+} catch {
+  // storage unavailable: keep the default (on)
+}
+$('screenContext').onchange = () => {
+  try {
+    localStorage.setItem(SCREEN_KEY, $('screenContext').checked ? 'on' : 'off');
+  } catch {
+    // not remembered
+  }
+};
+
 $('you').onchange = () => {
   try {
     localStorage.setItem(YOU_KEY, $('you').value.trim());
@@ -67,6 +81,20 @@ function render(s) {
     ? `${rec.status === 'recording' ? 'Recording' : rec.status} · ${rec.meeting?.title || 'meeting'} · since ${new Date(rec.startedAt).toLocaleTimeString()}${rec.error ? ` · ${rec.error}` : ''}`
     : '';
 
+  const sc = s.screen;
+  $('screenContext').disabled = !sc.available;
+  $('screenInfo').textContent = !rec
+    ? sc.available
+      ? ''
+      : 'Screen reading is unavailable on this Mac.'
+    : sc.state === 'reading'
+      ? `Screen: reading${sc.lastMatch ? ` · on screen: ${sc.lastMatch}` : ' · no code from the repository on screen'}`
+      : sc.state === 'error'
+        ? `Screen: ${sc.message}`
+        : sc.state === 'unavailable'
+          ? `Screen: ${sc.message}`
+          : '';
+
   const f = s.forwarding;
   $('forwarding').textContent = `Transcript events delivered: ${f.sent}${f.pending ? ` · waiting: ${f.pending}` : ''}${f.failures ? ` · retries: ${f.failures} (${f.lastError})` : ''}`;
   $('log').textContent = s.log.join('\n');
@@ -96,7 +124,7 @@ $('start').onclick = async () => {
       const created = await window.uc.createSession({ title: $('title').value.trim() || m?.title || 'Meeting', repositoryId: $('repo').value || null });
       sessionId = created.id;
     }
-    await window.uc.start({ windowId: selectedMeeting, sessionId, consentConfirmed: $('consent').checked, localName: $('you').value.trim() || null });
+    await window.uc.start({ windowId: selectedMeeting, sessionId, consentConfirmed: $('consent').checked, localName: $('you').value.trim() || null, screenContext: $('screenContext').checked && !$('screenContext').disabled });
     await loadSessions();
     $('session').value = sessionId;
   } catch (err) {

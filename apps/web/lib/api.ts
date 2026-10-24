@@ -45,6 +45,7 @@ export interface CaptureInfo {
   error: string | null;
   audioSeconds: number;
   model: string | null;
+  screen?: { lastAt: string; matched: string[] } | null;
 }
 
 export interface CaptureConfig {

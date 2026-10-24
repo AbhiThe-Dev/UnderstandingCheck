@@ -311,6 +311,18 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     return c.json({ results, capture: services.capture.status(c.req.param('id')) });
   });
 
+  /** Desktop app: code names read from the screen during a capture (on the user's computer; no images). */
+  app.post('/api/sessions/:id/capture/screen', async (c) => {
+    const body = await json(
+      c,
+      z.object({
+        identifiers: z.array(z.string().trim().min(1).max(120)).max(200),
+        files: z.array(z.object({ path: z.string().trim().min(1).max(300), line: z.number().int().positive().optional() })).max(50),
+      }),
+    );
+    return c.json(await services.capture.screen(c.req.param('id'), body));
+  });
+
   app.post('/api/sessions/:id/capture/stop', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const error = typeof (body as { error?: unknown }).error === 'string' ? ((body as { error: string }).error.slice(0, 500)) : undefined;

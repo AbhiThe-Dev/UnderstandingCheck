@@ -50,3 +50,12 @@ body {
     animation: none;
   }
 }
+
+/* Side panel next to a call (?view=panel): no site navigation, the panel has its own header. */
+body:has([data-view='panel']) > header {
+  display: none;
+}
+
+body:has([data-view='panel']) > main {
+  padding-top: 0;
+}

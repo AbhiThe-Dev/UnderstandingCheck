@@ -171,6 +171,24 @@ describe('meeting capture through Recall.ai', () => {
     await call('POST', `/api/sessions/${body.id}/capture/stop`);
   });
 
+  it('takes code names read from the screen during a capture and keeps only what the repository has', async () => {
+    const { body } = await call('POST', '/api/demo');
+    const screen = (b: unknown) => call('POST', `/api/sessions/${body.id}/capture/screen`, b);
+    const onScreen = { identifiers: ['approveApplication', 'somethingElse'], files: [{ path: 'src/applications/approve.ts', line: 17 }] };
+    expect((await screen(onScreen)).status).toBe(409); // nothing is being captured
+
+    await call('POST', `/api/sessions/${body.id}/capture/recall`, { consentConfirmed: true });
+    expect((await screen({ identifiers: Array.from({ length: 201 }, (_, i) => `name${i}`), files: [] })).status).toBe(400);
+    const r = await screen(onScreen);
+    expect(r.status).toBe(200);
+    expect(r.body.matched[0]).toBe('approveApplication (src/applications/approve.ts:11)');
+    expect(r.body.matched.join(' ')).not.toContain('somethingElse');
+    const view = (await call('GET', `/api/sessions/${body.id}`)).body;
+    expect(view.capture.screen.matched[0]).toContain('approveApplication');
+    expect(view.state.screen.files).toEqual(['src/applications/approve.ts']);
+    await call('POST', `/api/sessions/${body.id}/capture/stop`);
+  });
+
   it('rejects events for a session that is not capturing', async () => {
     const { body } = await call('POST', '/api/demo');
     expect((await call('POST', `/api/sessions/${body.id}/capture/recall/events`, utterance('A', 'hi there', 1))).status).toBe(409);

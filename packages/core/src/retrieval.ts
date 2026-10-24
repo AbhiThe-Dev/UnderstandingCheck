@@ -26,7 +26,7 @@ export class RetrievalCache {
   }
 }
 
-function toEvidence(sym: CodeSymbol, reason: string): Omit<CodeEvidence, 'id'> {
+export function toEvidence(sym: CodeSymbol, reason: string): Omit<CodeEvidence, 'id'> {
   return {
     symbolId: sym.id,
     symbolName: sym.symbolName,

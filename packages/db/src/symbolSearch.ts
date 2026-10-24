@@ -1,4 +1,4 @@
-import { and, count, eq, ilike, inArray, sql } from 'drizzle-orm';
+import { and, count, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { identifierTerms, splitIdentifier, stem, type CodeSymbol, type SymbolHit, type SymbolSearch } from '@uc/core';
 import type { Db } from './client';
 import { codeSymbols } from './schema';
@@ -101,6 +101,18 @@ export class PgSymbolSearch implements SymbolSearch {
       .select()
       .from(codeSymbols)
       .where(and(this.scope(), inArray(codeSymbols.symbolName, names), eq(codeSymbols.isTest, false)));
+    return rows.map(rowToSymbol);
+  }
+
+  async inFiles(paths: string[], limit: number): Promise<CodeSymbol[]> {
+    const wanted = paths.map((p) => p.replace(/^\/+/, '')).filter(Boolean);
+    if (wanted.length === 0) return [];
+    const esc = (p: string) => p.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const rows = await this.db
+      .select()
+      .from(codeSymbols)
+      .where(and(this.scope(), eq(codeSymbols.isTest, false), or(...wanted.flatMap((p) => [eq(codeSymbols.filePath, p), ilike(codeSymbols.filePath, `%/${esc(p)}`)]))))
+      .limit(limit);
     return rows.map(rowToSymbol);
   }
 

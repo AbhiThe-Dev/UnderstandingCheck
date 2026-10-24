@@ -2,13 +2,17 @@
 
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Lock } from 'lucide-react';
+import { Suspense, useEffect, useState } from 'react';
 import type { TranscriptSegmentInput } from '@uc/core';
 import { InputPanel } from '@/components/session/InputPanel';
+import { LivePanel } from '@/components/session/LivePanel';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
+import { Transcript } from '@/components/session/Transcript';
 import { Badge, Button, Card, CardHeader, CardTitle, Empty } from '@/components/ui/primitives';
 import { api, type CaptureConfig, type Samples, type SessionView } from '@/lib/api';
 import { useSession } from '@/lib/useSession';
+import { agoLabel, latestRequest, onScreen } from '@/lib/topic';
 import { ROLE_LABEL, formatTime, shortSha } from '@/lib/utils';
 
 export default function SessionPage() {
@@ -27,27 +31,24 @@ function Copilot() {
   const [samples, setSamples] = useState<Samples | null>(null);
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig | null>(null);
   const [showQueued, setShowQueued] = useState(false);
-  const transcriptEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api<Samples>('/api/samples').then(setSamples, () => undefined);
     api<CaptureConfig>('/api/capture/config').then(setCaptureConfig, () => undefined);
   }, []);
-  useEffect(() => {
-    transcriptEnd.current?.scrollIntoView({ block: 'nearest' });
-  }, [data?.segments.length]);
 
   if (error) return <Card className="p-6 text-sm">Could not load session: {error}</Card>;
   if (!data) return <p className="text-sm text-[var(--color-muted)]">Loading…</p>;
 
   const { state, segments, session, repo, metrics } = data;
   const ended = session.status === 'ended';
-  const name = (pid: string) => state.participants.find((p) => p.id === pid);
 
   const send = async (seg: TranscriptSegmentInput) => apply(await api<SessionView>(`/api/sessions/${id}/segments`, { body: seg }));
   const act: Act = async (did, action) => apply(await api<SessionView>(`/api/sessions/${id}/discrepancies/${did}/actions`, { body: { action } }));
   const respond: Respond = async (cid, participantId, body) =>
     apply(await api<SessionView>(`/api/sessions/${id}/clarifications/${cid}/responses`, { body: { participantId, ...body } }));
+  if (search.get('view') === 'panel') return <LivePanel id={id} data={data} connected={connected} act={act} respond={respond} />;
+
   const end = async () => {
     apply(await api<SessionView>(`/api/sessions/${id}/end`, { method: 'POST' }));
     router.push(`/sessions/${id}/summary`);
@@ -58,6 +59,8 @@ function Copilot() {
   const done = state.discrepancies.filter((d) => d.surfacedAtSegmentIndex !== null && ['resolved', 'unresolved'].includes(d.status));
   const focusEv = state.focus ? state.evidence.find((e) => e.id === state.focus!.evidenceId) : null;
   const current = state.requirements.filter((r) => r.status !== 'superseded');
+  const request = latestRequest(state, segments);
+  const screen = onScreen(state, segments);
 
   return (
     <div className="space-y-4">
@@ -126,26 +129,13 @@ function Copilot() {
               <CardTitle>Transcript</CardTitle>
               <span className="text-xs text-[var(--color-muted)]">{segments.length} segments</span>
             </CardHeader>
-            <div className="max-h-[46vh] overflow-y-auto px-4 py-2" data-testid="transcript">
-              {segments.length === 0 && <Empty>Replay a transcript or send live input below.</Empty>}
-              {segments.map((s) => {
-                const p = name(s.participantId);
-                return (
-                  <div key={s.id} className="settle-in py-1.5 text-sm">
-                    <span className="mr-2 font-mono text-[10px] text-[var(--color-muted)]">{formatTime(s.timestamp)}</span>
-                    <span className="font-medium">{p?.displayName}</span>
-                    {p?.ambiguous && <Badge tone="amber" className="ml-1">unattributed</Badge>}
-                    <span className="ml-1 text-[var(--color-muted)]">·</span> {s.text}
-                  </div>
-                );
-              })}
-              {data.capture?.status === 'live' && data.capture.partial && (
-                <div className="py-1.5 text-sm italic text-[var(--color-muted)]" data-testid="partial-caption">
-                  <span className="font-medium">{data.capture.partial.speaker}</span> · {data.capture.partial.text}…
-                </div>
-              )}
-              <div ref={transcriptEnd} />
-            </div>
+            <Transcript
+              segments={segments}
+              participants={state.participants}
+              partial={data.capture?.status === 'live' ? data.capture.partial : null}
+              className="max-h-[46vh] overflow-y-auto px-4 py-3"
+              empty={<Empty>Replay a transcript or send live input below.</Empty>}
+            />
           </Card>
           {!ended && (
             <InputPanel
@@ -172,10 +162,30 @@ function Copilot() {
               </Badge>
             </CardHeader>
             <div className="space-y-4 px-4 py-3 text-sm">
-              <Field label="Feature under discussion">
-                {state.feature.description || <span className="text-[var(--color-muted)]">Not stated yet</span>}
-                {state.feature.provenance === 'inferred' && <Badge className="ml-1.5">inferred</Badge>}
+              {state.feature.provenance !== 'inferred' && state.feature.description && <Field label="Feature">{state.feature.description}</Field>}
+              <Field label="Latest request">
+                {request ? (
+                  <>
+                    “{request.text}”
+                    <span className="ml-1.5 text-xs text-[var(--color-muted)]">
+                      {state.participants.find((p) => p.id === request.participantId)?.displayName ?? 'Someone'} · {agoLabel(request.agoMs)}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-[var(--color-muted)]">Nothing specific in the last 10 minutes</span>
+                )}
               </Field>
+              {screen.length > 0 && (
+                <Field label="On the shared screen">
+                  <ul className="space-y-0.5 font-mono text-xs" data-testid="on-screen">
+                    {screen.map((e) => (
+                      <li key={e.id}>
+                        {e.symbolName} · {e.filePath}:{e.startLine}
+                      </li>
+                    ))}
+                  </ul>
+                </Field>
+              )}
               {focusEv && (
                 <Field label="Existing behavior involved">
                   <div className="font-mono text-xs">
@@ -244,15 +254,17 @@ function Copilot() {
         </section>
 
         {/* Right: private suggestions */}
-        <section className="space-y-3" aria-live="polite">
+        <section className="order-first space-y-3 lg:order-none" aria-live="polite">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold">Private suggestions</h2>
-            <span className="text-xs text-[var(--color-muted)]">only you see these</span>
+            <span className="flex items-center gap-1 text-xs text-[var(--color-muted)]">
+              <Lock className="size-3" aria-hidden /> only you see these
+            </span>
           </div>
           {live.length === 0 && (
-            <Card>
+            <div className="rounded-xl border border-dashed border-[var(--color-line)]">
               <Empty>Nothing worth interrupting for. The copilot stays quiet unless people may expect different behavior.</Empty>
-            </Card>
+            </div>
           )}
           {live.map((d) => (
             <SuggestionCard
@@ -264,6 +276,7 @@ function Copilot() {
               act={act}
               respond={respond}
               readOnly={ended}
+              htmlUrl={repo?.htmlUrl}
             />
           ))}
           {queued.length > 0 && (
@@ -274,7 +287,7 @@ function Copilot() {
               {showQueued &&
                 queued.map((d) => (
                   <div key={d.id} className="mt-2">
-                    <SuggestionCard sessionId={id} d={d} clarifications={state.clarifications.filter((c) => c.discrepancyId === d.id)} participants={state.participants} act={act} respond={respond} readOnly={ended} />
+                    <SuggestionCard sessionId={id} d={d} clarifications={state.clarifications.filter((c) => c.discrepancyId === d.id)} participants={state.participants} act={act} respond={respond} readOnly={ended} htmlUrl={repo?.htmlUrl} />
                   </div>
                 ))}
             </div>
@@ -293,6 +306,7 @@ function Copilot() {
                   respond={respond}
                   readOnly
                   canRate={!ended}
+                  htmlUrl={repo?.htmlUrl}
                 />
               ))}
             </div>

@@ -118,6 +118,11 @@ export function updateFocus(
     if (overlap.length === 0) continue;
     if (!best || overlap.length > best.overlap.length) best = { ev, overlap };
   }
+  // Nothing named ("undo this"): the code on the shared screen is what "this" refers to.
+  if (!best) {
+    const seen = evidence.find((ev) => ev.reason === 'on screen' && !ev.isTest && ev.effects.length > 0);
+    if (seen) best = { ev: seen, overlap: [] };
+  }
   if (!best) return state.focus;
 
   const reversal = analysis.reversalWord !== null;

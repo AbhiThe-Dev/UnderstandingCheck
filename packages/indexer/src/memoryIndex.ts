@@ -77,6 +77,14 @@ export class InMemorySymbolIndex implements SymbolSearch {
     return this.docs.filter((d) => !d.symbol.isTest && set.has(d.symbol.symbolName)).map((d) => d.symbol);
   }
 
+  async inFiles(paths: string[], limit: number): Promise<CodeSymbol[]> {
+    const wanted = paths.map((p) => p.replace(/^\/+/, ''));
+    return this.docs
+      .filter((d) => !d.symbol.isTest && wanted.some((p) => d.symbol.filePath === p || d.symbol.filePath.endsWith(`/${p}`)))
+      .slice(0, limit)
+      .map((d) => d.symbol);
+  }
+
   async testsFor(symbolName: string, limit: number): Promise<CodeSymbol[]> {
     return this.docs
       .filter((d) => d.symbol.isTest && (d.symbol.calls.includes(symbolName) || d.symbol.content.includes(symbolName)))

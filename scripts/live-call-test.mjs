@@ -1,7 +1,11 @@
 // Live end-to-end test of meeting capture: a real Google Meet call, real Recall.ai capture, the real
 // GitHub repository, no people needed in the room.
 //
-//   node scripts/live-call-test.mjs <meet-url> [--unmute]
+//   node scripts/live-call-test.mjs <meet-url> [--unmute] [--screen]
+//
+// --screen: a screen-share run. Keep src/applications/approve.ts (e.g. on GitHub) visible on this Mac's
+// screen; Sam talks about "this" without ever naming the function, and the copilot must tie it to the
+// code it reads from the screen.
 //
 // A 1:1 call between the person at this Mac and "Sam":
 // - Sam is a Recall.ai bot that joins the call and speaks his lines (OpenAI text-to-speech).
@@ -43,8 +47,17 @@ const SCRIPT = [
   ['you', 'Sounds good.'],
 ];
 
+// Nobody names the code: "this" is whatever is on the shared screen.
+const SCREEN_SCRIPT = [
+  ['Sam', 'We need a way to undo this when someone gets it wrong.'],
+  ['Sam', "Easy enough. I'll just set the status back to pending."],
+  ['Sam', "I'll get it done this sprint."],
+];
+
 const meetUrl = process.argv[2];
 const unmute = process.argv.includes('--unmute');
+const screenRun = process.argv.includes('--screen');
+const LINES = screenRun ? SCREEN_SCRIPT : SCRIPT;
 if (!meetUrl?.startsWith('https://meet.google.com/')) {
   console.error('usage: node scripts/live-call-test.mjs https://meet.google.com/xxx-xxxx-xxx');
   process.exit(2);
@@ -228,6 +241,7 @@ async function startCapture(page, repoId, title) {
         $('title').value = ${JSON.stringify(title)};
         $('repo').value = ${JSON.stringify(repoId)};
         const you = $('you').value.trim();
+        if (!$('screenContext').checked && !$('screenContext').disabled) $('screenContext').click();
         $('consent').click();
         if ($('start').disabled) throw new Error('Start capture is disabled');
         $('start').click();
@@ -253,9 +267,21 @@ async function verify(sessionId, you) {
   const transcript = view.segments.map((s) => ({ speaker: names[s.participantId], text: s.text }));
   const live = view.state.discrepancies.filter((d) => d.visibility === 'live');
   const all = transcript.map((t) => t.text.toLowerCase()).join(' ');
+  if (screenRun) {
+    const seen = (view.state.screen?.evidenceIds ?? []).map((id) => view.state.evidence.find((e) => e.id === id)?.symbolName);
+    const checks = [
+      ['capture came from Recall', view.capture?.source === 'recall'],
+      ['every scripted line arrived', transcript.length >= LINES.length],
+      ['nobody named the function', !all.includes('approv')],
+      ['approveApplication was read from the screen', seen.includes('approveApplication')],
+      ['a live suggestion was raised', live.length > 0],
+      ['the suggestion cites src/applications/approve.ts', live.some((d) => d.codeRefs.some((r) => r.filePath === 'src/applications/approve.ts'))],
+    ];
+    return { sessionId, transcript, onScreen: seen, suggestions: live.map((d) => ({ category: d.category, title: d.title, code: d.codeRefs.map((r) => `${r.filePath}:${r.startLine}`) })), checks, capture: view.capture };
+  }
   const checks = [
     ['capture came from Recall', view.capture?.source === 'recall'],
-    ['every scripted line arrived', transcript.length >= SCRIPT.length],
+    ['every scripted line arrived', transcript.length >= LINES.length],
     [`speakers are named ${you} and Sam`, [you, 'Sam'].every((n) => Object.values(names).includes(n))],
     ['no line attributed to "Guest", "Host" or "Others"', !Object.values(names).some((n) => ['Guest', 'Host', 'Others'].includes(n))],
     ['key words transcribed ("undo", "pending")', all.includes('undo') && all.includes('pending')],
@@ -279,7 +305,7 @@ try {
   log('generating speech');
   mkdirSync(OUT, { recursive: true });
   const audio = [];
-  for (const [i, [who, text]] of SCRIPT.entries()) {
+  for (const [i, [who, text]] of LINES.entries()) {
     const mp3 = await speak(text, SPEAKERS[who]);
     const file = join(OUT, `line-${i}.mp3`);
     writeFileSync(file, mp3);
@@ -316,6 +342,7 @@ try {
 
   console.log('\nTranscript:');
   for (const t of report.transcript) console.log(`  ${t.speaker}: ${t.text}`);
+  if (report.onScreen) console.log(`\nOn screen: ${report.onScreen.join(', ') || '(nothing matched)'}`);
   console.log('\nSuggestions:');
   for (const s of report.suggestions) console.log(`  [${s.category}] ${s.title} (${s.code.join(', ')})`);
   console.log('\nChecks:');

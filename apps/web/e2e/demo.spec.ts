@@ -34,6 +34,14 @@ test('seeded demo: suspected false alignment → private checks → confirmed di
   await expect(card).toContainText('Different expectations confirmed');
   await expect(page.getByTestId('suggested-question')).toContainText("should the applicant's access also be revoked?");
 
+  // The side panel next to a call: the suggestion first, who expects what, no site navigation.
+  const sessionUrl = page.url().replace(/\?.*$/, '');
+  await page.goto(`${sessionUrl}?view=panel`);
+  await expect(page.getByTestId('suggestion')).toContainText('Who expects what');
+  await expect(page.getByTestId('suggested-question')).toContainText("should the applicant's access also be revoked?");
+  await expect(page.getByRole('link', { name: 'Repositories' })).toBeHidden();
+  await page.goto(sessionUrl);
+
   // The team settles it in conversation; step through it one turn at a time.
   await page.getByTestId('replay-text').fill(FOLLOW_UP);
   await page.getByRole('button', { name: 'Step' }).click();

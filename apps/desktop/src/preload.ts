@@ -7,7 +7,7 @@ contextBridge.exposeInMainWorld('uc', {
   sessions: () => ipcRenderer.invoke('sessions'),
   repos: () => ipcRenderer.invoke('repos'),
   createSession: (body: { title: string; repositoryId: string | null; featureDescription?: string }) => ipcRenderer.invoke('session:create', body),
-  start: (args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null }) => ipcRenderer.invoke('capture:start', args),
+  start: (args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null; screenContext: boolean }) => ipcRenderer.invoke('capture:start', args),
   stop: () => ipcRenderer.invoke('capture:stop'),
   requestPermission: (p: string) => ipcRenderer.invoke('permission', p),
   openPanel: (sessionId: string) => ipcRenderer.invoke('panel', sessionId),

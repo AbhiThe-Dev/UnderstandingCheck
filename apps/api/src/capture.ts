@@ -23,6 +23,8 @@ export interface CaptureInfo {
   error: string | null;
   audioSeconds: number;
   model: string | null;
+  /** Recall only: code read from the shared screen on the desktop, as matched against the repository. */
+  screen: { lastAt: string; matched: string[] } | null;
 }
 
 export interface MicrophoneConnection {
@@ -88,6 +90,7 @@ export class CaptureManager {
       error: null,
       audioSeconds: 0,
       model: null,
+      screen: null,
       ...extra,
       baseTimestampMs: last ? last.timestamp + 2000 : 0,
     };
@@ -157,6 +160,20 @@ export class CaptureManager {
   private remotes(info: CaptureInfo & { roster?: Map<string, string> }) {
     const local = info.localName?.toLowerCase();
     return [...new Set(info.roster?.values() ?? [])].filter((n) => n.toLowerCase() !== local);
+  }
+
+  /**
+   * Code names the desktop app read from the screen (never images or prose). Only names that match
+   * the session's repository are kept, as context for what people are looking at.
+   */
+  async screen(sessionId: string, mentions: { identifiers: string[]; files: { path: string; line?: number }[] }) {
+    const info = this.captures.get(sessionId);
+    if (!info || info.status !== 'live') throw this.makeError(409, 'No capture is running for this session');
+    const { snapshot: { state } } = await this.services.run(sessionId, (engine) => engine.observeScreen(mentions));
+    const seen = state.screen ? state.screen.evidenceIds.flatMap((id) => state.evidence.find((e) => e.id === id) ?? []) : [];
+    info.screen = { lastAt: new Date().toISOString(), matched: seen.map((e) => `${e.symbolName} (${e.filePath}:${e.startLine})`) };
+    this.services.notify(sessionId);
+    return { matched: info.screen.matched };
   }
 
   stop(sessionId: string, error?: string) {

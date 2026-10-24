@@ -2,13 +2,14 @@ import { mergeConfig, type DeepPartial, type EngineConfig } from './config';
 import { CONSEQUENCE_WEIGHT, describeEffect } from './lexicon';
 import type { Analyzer, ClarificationPurpose, RawCandidate, SegmentAnalysis, SymbolSearch, UsageSink } from './ports';
 import { decide, hasLiveCapacity, scoreDiscrepancy } from './prioritizer';
-import { RetrievalCache, retrieveContext } from './retrieval';
+import { RetrievalCache, retrieveContext, toEvidence } from './retrieval';
 import { contentTerms, leadingYesNo } from './text';
 import { addPosition, consensus, firmPositions, isOpen, isPriorRecord, needsIndependentAnswer, setStatus } from './tracker';
 import type {
   Claim,
   Clarification,
   CodeEvidence,
+  CodeSymbol,
   Discrepancy,
   DiscrepancyCategory,
   EngineEvent,
@@ -52,6 +53,9 @@ const CATEGORY_RANK: Record<DiscrepancyCategory, number> = {
   direct_disagreement: 4,
   false_alignment: 5,
 };
+
+/** How long code seen on the shared screen keeps counting as context (meeting time). */
+export const SCREEN_WINDOW_MS = 10 * 60_000;
 
 // "Others" is several remote people sharing one audio stream (see the API's Recall capture).
 const AMBIGUOUS_SPEAKER = /^(unknown|unidentified|speaker\s*\d*|participant\s*\d+|guest|others|\?+|unattributed)$/i;
@@ -371,6 +375,85 @@ export class SessionEngine {
     return p;
   }
 
+  // ------------------------------------------------------------------ screen
+
+  /**
+   * Code visible on the shared screen: names and file paths read on the user's computer (the
+   * desktop app never sends screen images or prose). Matching symbols join the evidence pool, so
+   * "undo this" can refer to the function on screen. What people say still decides the focus; the
+   * screen only sets it when there is none or the current one has gone stale.
+   */
+  async observeScreen(input: { identifiers: string[]; files: { path: string; line?: number }[] }): Promise<EngineEvent[]> {
+    const search = this.deps.search;
+    if (!search || this.state.ended) return [];
+    const names = [...new Set(input.identifiers)].slice(0, 200);
+    const files = input.files.slice(0, 50);
+    const paths = [...new Set(files.map((f) => f.path.replace(/^\/+/, '')))];
+    const [named, inFiles] = await Promise.all([search.byNames(names), paths.length > 0 && search.inFiles ? search.inFiles(paths, 200) : []]);
+
+    const inPath = (sym: CodeSymbol, p: string) => sym.filePath === p || sym.filePath.endsWith(`/${p}`);
+    const nameSet = new Set(names);
+    // Named on screen counts most, then a visible line inside it, then being in a visible file.
+    const score = (sym: CodeSymbol) =>
+      (nameSet.has(sym.symbolName) ? 2 : 0) +
+      (files.some((f) => f.line !== undefined && inPath(sym, f.path) && f.line >= sym.startLine && f.line <= sym.endLine) ? 1.5 : 0) +
+      (paths.some((p) => inPath(sym, p)) ? 1 : 0);
+    const unique = new Map([...named, ...inFiles].map((s) => [s.id, s]));
+    const ranked = [...unique.values()]
+      .filter((s) => !s.isTest)
+      .sort((a, b) => score(b) - score(a) || b.effects.length - a.effects.length)
+      .slice(0, this.cfg.retrieval.maxSymbols);
+
+    if (ranked.length === 0) {
+      this.state.screen = null;
+      return [{ type: 'screen_observed', evidenceIds: [], files: [] }];
+    }
+    const pooled = ranked.map((s) => this.poolEvidence(toEvidence(s, 'on screen')));
+    const now = this.segments.at(-1)?.timestamp ?? 0;
+    this.state.screen = { at: now, evidenceIds: pooled.map((e) => e.id), files: paths };
+
+    const focusAt = this.state.focus?.segmentId ? this.segMap.get(this.state.focus.segmentId)?.timestamp : undefined;
+    const focusStale = !this.state.focus || (focusAt !== undefined && now - focusAt > SCREEN_WINDOW_MS);
+    const lead = pooled.find((e) => e.effects.length > 0);
+    if (focusStale && lead && this.state.focus?.symbolId !== lead.symbolId) {
+      this.state.focus = {
+        symbolId: lead.symbolId,
+        evidenceId: lead.id,
+        symbolName: lead.symbolName,
+        reversal: false,
+        operationWords: [],
+        reversalWord: null,
+        actor: null,
+        introducedBy: null,
+        segmentId: null,
+      };
+      this.noteExistingBehavior();
+    }
+    if (this.state.contextStatus !== 'sufficient') this.state.contextStatus = 'sufficient';
+    return [{ type: 'screen_observed', evidenceIds: pooled.map((e) => e.id), files: paths }];
+  }
+
+  /** On-screen evidence that is still recent enough to count. */
+  private screenEvidence(): CodeEvidence[] {
+    const sc = this.state.screen;
+    if (!sc) return [];
+    const now = this.segments.at(-1)?.timestamp ?? 0;
+    if (now - sc.at > SCREEN_WINDOW_MS) return [];
+    return sc.evidenceIds.flatMap((id) => {
+      const e = this.state.evidence.find((x) => x.id === id);
+      return e ? [{ ...e, reason: 'on screen' }] : [];
+    });
+  }
+
+  private poolEvidence(e: Omit<CodeEvidence, 'id'>): CodeEvidence {
+    let pooled = this.state.evidence.find((x) => x.symbolId === e.symbolId);
+    if (!pooled) {
+      pooled = { ...e, id: `E${this.state.evidence.length + 1}` };
+      this.state.evidence.push(pooled);
+    }
+    return pooled;
+  }
+
   // ------------------------------------------------------------------ retrieval
 
   private async retrieve(analysis: SegmentAnalysis, events: EngineEvent[]): Promise<CodeEvidence[]> {
@@ -378,21 +461,19 @@ export class SessionEngine {
       this.state.contextStatus = 'insufficient';
       return [];
     }
+    const onScreen = this.screenEvidence();
     const terms = contentTerms(analysis.words.join(' '));
-    if (terms.length === 0) return [];
+    if (terms.length === 0) return onScreen;
     const r = await retrieveContext({ terms, words: analysis.words }, this.deps.search, this.cfg.retrieval, this.cache);
     this.state.metrics.retrievals++;
     if (r.cacheHit) this.state.metrics.retrievalCacheHits++;
     const out: CodeEvidence[] = [];
     for (const e of r.evidence) {
-      let pooled = this.state.evidence.find((x) => x.symbolId === e.symbolId);
-      if (!pooled) {
-        pooled = { ...e, id: `E${this.state.evidence.length + 1}` };
-        this.state.evidence.push(pooled);
-      }
       // The reason reflects *this* retrieval (primary match vs. followed call), the id stays stable.
-      out.push({ ...pooled, reason: e.reason });
+      out.push({ ...this.poolEvidence(e), reason: e.reason });
     }
+    // Code people are looking at counts even when nobody names it.
+    for (const e of onScreen) if (!out.some((x) => x.id === e.id)) out.push(e);
     if (r.sufficient) this.state.contextStatus = 'sufficient';
     else if (this.state.contextStatus === 'none') this.state.contextStatus = 'insufficient';
     events.push({ type: 'context_retrieved', evidenceIds: out.map((e) => e.id), sufficient: r.sufficient });

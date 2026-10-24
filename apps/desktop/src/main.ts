@@ -2,6 +2,7 @@ import { BrowserWindow, Menu, Tray, app, ipcMain, nativeImage, screen, shell } f
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ForwardQueue, api, type ApiConfig } from './backend';
+import { ScreenWatcher, type ScreenStatus } from './screen';
 
 /**
  * Desktop companion for meeting capture.
@@ -45,8 +46,11 @@ interface State {
     status: 'starting' | 'recording' | 'ended' | 'error';
     startedAt: string;
     error: string | null;
+    screenContext: boolean;
   } | null;
   forwarding: { sent: number; pending: number; failures: number; lastError: string | null };
+  /** Reading code names from the screen during a recording (on this Mac). */
+  screen: ScreenStatus & { available: boolean };
   log: string[];
 }
 
@@ -69,6 +73,7 @@ const state: State = {
   network: 'online',
   recording: null,
   forwarding: { sent: 0, pending: 0, failures: 0, lastError: null },
+  screen: { state: 'off', lastMatch: null, message: null, available: false },
   log: [],
 };
 
@@ -81,6 +86,13 @@ const queue = new ForwardQueue(cfg, (stats) => {
   state.forwarding = stats;
   push();
 });
+
+const screenWatcher = new ScreenWatcher(cfg, (s) => {
+  if (s.state === 'error' && state.screen.state !== 'error') log(`Screen reading: ${s.message}`);
+  state.screen = { ...s, available: screenWatcher.available };
+  push();
+});
+state.screen.available = screenWatcher.available;
 
 function log(line: string) {
   state.log = [`${new Date().toLocaleTimeString()} ${line}`, ...state.log].slice(0, 40);
@@ -143,7 +155,10 @@ async function startSdk() {
     push();
   });
   sdk.addEventListener('recording-started', ({ window }) => {
-    if (state.recording?.windowId === window.id) state.recording.status = 'recording';
+    if (state.recording?.windowId === window.id) {
+      state.recording.status = 'recording';
+      if (state.recording.screenContext) screenWatcher.start(state.recording.sessionId);
+    }
     log('Recording started');
     push();
   });
@@ -186,7 +201,7 @@ async function startSdk() {
   push();
 }
 
-async function startCapture(args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null }) {
+async function startCapture(args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null; screenContext: boolean }) {
   if (!sdk || state.sdk !== 'ready') throw new Error(state.sdkMessage ?? 'The Recall SDK is not ready');
   if (!args.consentConfirmed) throw new Error('Confirm that participants know the meeting is recorded and transcribed');
   if (state.recording && ['starting', 'recording'].includes(state.recording.status)) throw new Error('Already recording; stop first');
@@ -195,7 +210,7 @@ async function startCapture(args: { windowId: string; sessionId: string; consent
     method: 'POST',
     body: { consentConfirmed: true, meeting: meeting ? { title: meeting.title, platform: meeting.platform } : null, localName: args.localName?.trim() || null },
   });
-  state.recording = { windowId: args.windowId, sessionId: args.sessionId, uploadId, meeting, status: 'starting', startedAt: new Date().toISOString(), error: null };
+  state.recording = { windowId: args.windowId, sessionId: args.sessionId, uploadId, meeting, status: 'starting', startedAt: new Date().toISOString(), error: null, screenContext: args.screenContext };
   push();
   try {
     await sdk.startRecording({ windowId: args.windowId, uploadToken });
@@ -213,6 +228,7 @@ async function endCapture() {
   const rec = state.recording;
   if (!rec || rec.status === 'ended') return;
   rec.status = 'ended';
+  screenWatcher.stop();
   await queue.flush();
   await api(cfg, `/api/sessions/${rec.sessionId}/capture/stop`, { method: 'POST', body: {} }).catch(() => undefined);
   log('Recording ended');
@@ -244,7 +260,7 @@ function openPanel(sessionId: string) {
     // The side panel is private to this screen: keep it out of screen shares where the OS allows.
     panel.setContentProtection(true);
   }
-  void panel.loadURL(`${cfg.webUrl}/sessions/${sessionId}`);
+  void panel.loadURL(`${cfg.webUrl}/sessions/${sessionId}?view=panel`);
   panel.show();
 }
 
@@ -269,7 +285,7 @@ ipcMain.handle('repos', () => api(cfg, '/api/repos'));
 ipcMain.handle('session:create', (_e, body: { title: string; repositoryId: string | null; featureDescription?: string }) =>
   api(cfg, '/api/sessions', { method: 'POST', body: { ...body, consentConfirmed: true } }),
 );
-ipcMain.handle('capture:start', (_e, args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null }) => startCapture(args));
+ipcMain.handle('capture:start', (_e, args: { windowId: string; sessionId: string; consentConfirmed: boolean; localName: string | null; screenContext: boolean }) => startCapture(args));
 ipcMain.handle('capture:stop', () => stopCapture());
 ipcMain.handle('permission', (_e, p: PermissionName) => sdk?.requestPermission(p));
 ipcMain.handle('panel', (_e, sessionId: string) => openPanel(sessionId));

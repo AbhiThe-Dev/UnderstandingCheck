@@ -372,6 +372,18 @@ export const SessionState = z.object({
   counters: z.record(z.string(), z.number().int()),
   /** externalIds already ingested (idempotent live ingestion). */
   externalIds: z.array(z.string()).optional(),
+  /**
+   * Code currently visible on the shared screen, matched against the repository (desktop capture).
+   * `at` is the meeting time it was last seen; older than the screen window it no longer counts.
+   */
+  screen: z
+    .object({
+      at: z.number().int(),
+      evidenceIds: z.array(z.string()),
+      files: z.array(z.string()),
+    })
+    .nullable()
+    .optional(),
 });
 export type SessionState = z.infer<typeof SessionState>;
 
@@ -389,4 +401,5 @@ export type EngineEvent =
   | { type: 'clarification_created'; clarification: Clarification }
   | { type: 'clarification_updated'; clarification: Clarification }
   | { type: 'requirement_recorded'; requirement: Requirement }
-  | { type: 'budget_exhausted'; spentUsd: number; limitUsd: number };
+  | { type: 'budget_exhausted'; spentUsd: number; limitUsd: number }
+  | { type: 'screen_observed'; evidenceIds: string[]; files: string[] };

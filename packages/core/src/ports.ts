@@ -30,6 +30,8 @@ export interface SymbolSearch {
   /** Lexical search. `terms` are stemmed; `words` are the raw surface words they came from. */
   lexical(query: { terms: string[]; words: string[] }, limit: number): Promise<SymbolHit[]>;
   byNames(names: string[]): Promise<CodeSymbol[]>;
+  /** Non-test symbols in these files; a path may be a suffix (`approve.ts` matches `src/applications/approve.ts`). */
+  inFiles?(paths: string[], limit: number): Promise<CodeSymbol[]>;
   /** Test symbols that reference `symbolName`. */
   testsFor(symbolName: string, limit: number): Promise<CodeSymbol[]>;
 }

@@ -54,6 +54,7 @@
       <h2>3 · Record</h2>
       <label for="you" class="muted">Your name, as it appears in the meeting</label>
       <input type="text" id="you" placeholder="Your name" style="margin-bottom:8px" />
+      <label style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px"><input type="checkbox" id="screenContext" checked /> <span>Use what's on screen as context <span class="muted">(read on this Mac; only code names are kept)</span></span></label>
       <label style="display:flex;gap:6px;align-items:flex-start"><input type="checkbox" id="consent" /> <span>Everyone in this meeting knows it is being recorded and transcribed for analysis.</span></label>
       <div class="row" style="margin-top:8px">
         <button class="primary" id="start">Start capture</button>
@@ -61,6 +62,7 @@
         <button id="panel" style="display:none">Open suggestions</button>
       </div>
       <div id="recInfo" class="muted"></div>
+      <div id="screenInfo" class="muted"></div>
       <div id="startError" class="err"></div>
     </section>
 
