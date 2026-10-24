@@ -23,6 +23,7 @@ import {
 import { useState } from 'react';
 import type { Clarification, Discrepancy, Participant } from '@uc/core';
 import { CodeLink } from '@/components/CodeLink';
+import { SlackLink } from '@/components/SlackLink';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/primitives';
 import { CATEGORY_LABEL, STATUS_LABEL, cn } from '@/lib/utils';
@@ -168,6 +169,16 @@ export function SuggestionCard(props: {
             {d.codeRefs.slice(0, 3).map((r) => (
               <li key={`${r.filePath}:${r.startLine}`} className="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2 py-0.5" title={r.note}>
                 <CodeLink htmlUrl={props.htmlUrl} r={r} className="font-mono text-[11px]" />
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {d.slackRefs && d.slackRefs.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5" aria-label="Slack messages involved">
+            {d.slackRefs.slice(0, 3).map((r) => (
+              <li key={r.id} className="rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] px-2 py-0.5">
+                <SlackLink r={r} note={r.note} className="text-[11px]" />
               </li>
             ))}
           </ul>

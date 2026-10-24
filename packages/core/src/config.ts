@@ -27,6 +27,8 @@ export interface EngineConfig {
   retrieval: {
     maxSymbols: number;
     contextBudgetTokens: number;
+    /** Cap on Slack message text sent to the model per call. */
+    slackBudgetTokens: number;
     minScore: number;
     maxTestsPerSymbol: number;
   };
@@ -65,7 +67,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
     missing_specification: 2,
   },
   rateLimit: { maxLivePerSession: 6, maxOpenLive: 3 },
-  retrieval: { maxSymbols: 6, contextBudgetTokens: 2500, minScore: 1.2, maxTestsPerSymbol: 1 },
+  retrieval: { maxSymbols: 6, contextBudgetTokens: 2500, slackBudgetTokens: 800, minScore: 1.2, maxTestsPerSymbol: 1 },
   agreementWindow: 3,
   recentWindow: 12,
   budget: { workspaceLimitUsd: 5 },

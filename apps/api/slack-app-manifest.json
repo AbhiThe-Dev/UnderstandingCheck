@@ -1,0 +1,17 @@
+{
+  "display_information": {
+    "name": "Understanding Check",
+    "description": "Uses Slack messages you can see as context during meetings. Message text is never stored."
+  },
+  "oauth_config": {
+    "redirect_urls": ["http://localhost:4000/api/slack/oauth/callback"],
+    "scopes": {
+      "user": ["search:read.public", "search:read.private", "search:read.im", "search:read.mpim"]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

@@ -1,4 +1,4 @@
-import type { CodeRef } from '@uc/core';
+import { slackPointer, type CodeRef, type SlackCitation } from '@uc/core';
 import { recordLabel, type RecordRow, type VersionRow } from '@uc/db';
 
 export interface RecordWithVersions {
@@ -25,6 +25,12 @@ export function recordsToMarkdown(items: RecordWithVersions[], opts: { history: 
     if (refs.length) {
       lines.push('**Code**');
       for (const r of refs) lines.push(`- \`${r.filePath}:${r.startLine}\` @ \`${r.commitSha.slice(0, 20)}\` — ${r.note}`);
+      lines.push('');
+    }
+    const slack = (current.slackRefs ?? []) as SlackCitation[];
+    if (slack.length) {
+      lines.push('**Slack**');
+      for (const r of slack) lines.push(`- [${slackPointer(r)}](${r.permalink}) — ${r.note}`);
       lines.push('');
     }
     lines.push(`Confirmed by ${current.confirmedBy.join(', ') || '—'} (${current.confirmation}) in “${current.sessionTitle}”.`, '');

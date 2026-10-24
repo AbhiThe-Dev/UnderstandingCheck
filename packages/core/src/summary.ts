@@ -1,4 +1,5 @@
-import type { CodeRef, Discrepancy, Requirement, SessionState } from './types';
+import { slackPointer } from './slack';
+import type { CodeRef, Discrepancy, Requirement, SessionState, SlackCitation } from './types';
 
 export interface MeetingSummary {
   feature: string;
@@ -8,6 +9,8 @@ export interface MeetingSummary {
   resolvedMisunderstandings: { discrepancy: Discrepancy; resolution: string; hadDifferentExpectations: boolean }[];
   openQuestions: { text: string; discrepancyId: string | null }[];
   codeRefs: CodeRef[];
+  /** Slack messages the meeting's concerns cited (links only). */
+  slackRefs: SlackCitation[];
   acceptanceCriteria: string[];
   disclaimer: string;
 }
@@ -40,6 +43,11 @@ export function buildSummary(state: SessionState): MeetingSummary {
     if (d.status === 'dismissed' || d.visibility === 'hidden') continue;
     for (const r of d.codeRefs) refs.set(`${r.filePath}:${r.startLine}`, r);
   }
+  const slack = new Map<string, SlackCitation>();
+  for (const d of state.discrepancies) {
+    if (d.status === 'dismissed' || d.visibility === 'hidden') continue;
+    for (const r of d.slackRefs ?? []) slack.set(r.permalink, r);
+  }
 
   return {
     feature: state.feature.description || '(not stated)',
@@ -53,6 +61,7 @@ export function buildSummary(state: SessionState): MeetingSummary {
     resolvedMisunderstandings: resolved,
     openQuestions: [...state.openQuestions.map((q) => ({ text: q.text, discrepancyId: q.discrepancyId })), ...openFromDiscrepancies],
     codeRefs: [...refs.values()],
+    slackRefs: [...slack.values()],
     acceptanceCriteria: confirmed.flatMap((r) => r.acceptanceCriteria),
     disclaimer: DISCLAIMER,
   };
@@ -87,6 +96,10 @@ export function summaryToMarkdown(s: MeetingSummary, opts: { repoUrl?: string; c
   lines.push('', '### Affected code');
   if (s.codeRefs.length === 0) lines.push('_None._');
   for (const r of s.codeRefs) lines.push(`- ${link(r)} — ${r.note}`);
+  if (s.slackRefs.length) {
+    lines.push('', '### Slack discussion');
+    for (const r of s.slackRefs) lines.push(`- [${slackPointer(r)}](${r.permalink}) — ${r.note}`);
+  }
   lines.push('', '### Suggested acceptance criteria');
   if (s.acceptanceCriteria.length === 0) lines.push('_None yet._');
   for (const c of s.acceptanceCriteria) lines.push(`- [ ] ${c}`);

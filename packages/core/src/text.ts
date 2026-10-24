@@ -71,6 +71,17 @@ export function contentTerms(text: string, opts: { keepGeneric?: boolean } = {})
   return [...out];
 }
 
+/** Distinct non-stopword words in order of first use, unstemmed (for keyword search outside the index). */
+export function keywords(text: string, max = 8): string[] {
+  const out: string[] = [];
+  for (const w of words(text)) {
+    if (STOPWORDS.has(w) || w.length < 3 || GENERIC.has(stem(w)) || out.includes(w)) continue;
+    out.push(w);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 export function identifierTerms(id: string): string[] {
   return splitIdentifier(id)
     .filter((w) => w.length >= 2 && !STOPWORDS.has(w))

@@ -9,6 +9,7 @@ export * from './validate';
 export * from './prioritizer';
 export * from './tracker';
 export * from './engine';
+export * from './slack';
 export * from './summary';
 export * from './transcript';
 export * from './metrics';

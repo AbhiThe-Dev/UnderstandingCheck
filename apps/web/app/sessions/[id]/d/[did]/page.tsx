@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useState } from 'react';
 import type { Clarification, Discrepancy, SessionState } from '@uc/core';
 import { CodeLink } from '@/components/CodeLink';
+import { SlackExcerpt } from '@/components/SlackLink';
 import { Badge, Button, Card, CardHeader, CardTitle, Empty, Label, Textarea } from '@/components/ui/primitives';
 import { api, type SessionView } from '@/lib/api';
 import { useSession } from '@/lib/useSession';
@@ -72,6 +73,18 @@ export default function ClarificationDetail() {
             ))}
           </div>
         </Card>
+        {d.slackRefs && d.slackRefs.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Evidence from Slack</CardTitle>
+            </CardHeader>
+            <div className="space-y-3 px-4 py-3">
+              {d.slackRefs.map((r) => (
+                <SlackExcerpt key={r.id} r={r} note={r.note} text={data.slackExcerpts?.find((x) => x.id === r.id)?.text} />
+              ))}
+            </div>
+          </Card>
+        )}
       </div>
 
       <Card>

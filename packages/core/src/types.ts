@@ -110,6 +110,26 @@ export const CodeRef = z.object({
 });
 export type CodeRef = z.infer<typeof CodeRef>;
 
+/**
+ * A Slack message used as context, by reference only: Slack's terms forbid storing what search
+ * returns, so persisted state never holds message text. Private channels and DMs keep no channel
+ * or author name either; the permalink only opens for people who can already see the message.
+ */
+export const SlackRef = z.object({
+  id: z.string(),
+  permalink: z.string(),
+  /** "#approvals", or "private conversation" for private channels and DMs. */
+  channelLabel: z.string(),
+  authorName: z.string().nullable(),
+  ts: z.string(),
+  private: z.boolean(),
+});
+export type SlackRef = z.infer<typeof SlackRef>;
+
+/** A Slack citation inside a discrepancy. */
+export const SlackCitation = SlackRef.extend({ note: z.string() });
+export type SlackCitation = z.infer<typeof SlackCitation>;
+
 // ---------- Conversation state ----------
 
 export const Provenance = z.enum(['explicit', 'inferred', 'unknown']);
@@ -201,6 +221,8 @@ export const Discrepancy = z.object({
   description: z.string(),
   statements: z.array(Quote),
   codeRefs: z.array(CodeRef),
+  /** Slack messages the concern rests on (references only). Absent in sessions from before Slack. */
+  slackRefs: z.array(SlackCitation).optional(),
   interpretations: z.array(Interpretation),
   impact: z.object({
     consequence: z.union([EffectCategory, z.literal('business_rule')]),
@@ -298,6 +320,8 @@ export const Requirement = z.object({
   priorRecord: z.object({ id: z.string(), outcome: z.enum(['supersedes', 'reaffirms']) }).nullable().optional(),
   acceptanceCriteria: z.array(z.string()),
   codeRefs: z.array(CodeRef),
+  /** Slack messages behind the decision, by reference only. */
+  slackRefs: z.array(SlackCitation).optional(),
 });
 export type Requirement = z.infer<typeof Requirement>;
 
@@ -384,6 +408,16 @@ export const SessionState = z.object({
     })
     .nullable()
     .optional(),
+  /** Slack messages seen this session, by reference (never their text). */
+  slackRefs: z.array(SlackRef).optional(),
+  /** The latest Slack search results that still count as context; `at` is meeting time. */
+  slack: z
+    .object({
+      at: z.number().int(),
+      refIds: z.array(z.string()),
+    })
+    .nullable()
+    .optional(),
 });
 export type SessionState = z.infer<typeof SessionState>;
 
@@ -402,4 +436,5 @@ export type EngineEvent =
   | { type: 'clarification_updated'; clarification: Clarification }
   | { type: 'requirement_recorded'; requirement: Requirement }
   | { type: 'budget_exhausted'; spentUsd: number; limitUsd: number }
-  | { type: 'screen_observed'; evidenceIds: string[]; files: string[] };
+  | { type: 'screen_observed'; evidenceIds: string[]; files: string[] }
+  | { type: 'slack_observed'; refIds: string[] };

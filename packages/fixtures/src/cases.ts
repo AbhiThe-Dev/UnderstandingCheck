@@ -8,6 +8,8 @@ export interface FixtureCase {
   repo: RepoName | null;
   featureDescription?: string;
   priorDecisions?: PriorDecision[];
+  /** Slack search results handed to the engine at session start (as if found by the prefetch). */
+  slack?: { channelName: string; channelKind?: 'public' | 'private' | 'dm'; authorName: string; text: string }[];
   transcript: string;
   /**
    * Held-out cases use a different repository, domain, names and wording than the development cases.
@@ -152,6 +154,46 @@ Sam (Developer): OK, fine, access stays until the end of the day then.`,
     priorDecisions: [
       { id: 'ISSUE-42', description: 'Approved members must keep portal access for at least 30 days after approval.', source: 'issue #42' },
     ],
+    transcript: `Priya (PO): When an admin undoes an approval, the member should lose portal access immediately.
+Sam (Developer): Okay, I'll revoke access as part of the undo.`,
+    expected: { surfaced: ['direct_disagreement'] },
+  },
+  {
+    id: 's1-slack-decision-conflict',
+    title: 'Slack: the call contradicts a decision made in a public channel',
+    repo: 'approvals',
+    slack: [{ channelName: 'approvals', authorName: 'Dana', text: 'Decision: approved members must keep portal access for at least 30 days after approval.' }],
+    transcript: `Priya (PO): When an admin undoes an approval, the member should lose portal access immediately.
+Sam (Developer): Okay, I'll revoke access as part of the undo.`,
+    expected: { surfaced: ['direct_disagreement'] },
+  },
+  {
+    id: 's2-slack-unrelated',
+    title: 'Slack: unrelated chatter found by the search stays silent',
+    repo: 'approvals',
+    slack: [
+      { channelName: 'random', authorName: 'Chris', text: 'Lunch after standup tomorrow? The game last night had a great finish.' },
+      { channelName: 'general', authorName: 'Dana', text: 'Reminder: the office is closed on Friday.' },
+    ],
+    transcript: `Chris (Developer): Did anyone catch the game last night?
+Priya (PO): Only the second half, it was a great finish.
+Chris (Developer): We should grab lunch after standup tomorrow.`,
+    expected: { surfaced: [] },
+  },
+  {
+    id: 's3-slack-agrees',
+    title: 'Slack: a Slack decision the call agrees with is not a conflict',
+    repo: 'approvals',
+    slack: [{ channelName: 'approvals', authorName: 'Dana', text: 'Agreed: when an admin undoes an approval, the member should lose portal access immediately.' }],
+    transcript: `Priya (PO): When an admin undoes an approval, the member should lose portal access immediately.
+Sam (Developer): Okay, I'll revoke access as part of the undo.`,
+    expected: { surfaced: [], notSurfaced: ['direct_disagreement'] },
+  },
+  {
+    id: 's4-slack-dm-conflict',
+    title: 'Slack: the call contradicts a decision made in a DM',
+    repo: 'approvals',
+    slack: [{ channelName: 'U0PARTNER', channelKind: 'dm', authorName: 'Dana', text: 'Decision: approved members must keep portal access for at least 30 days after approval.' }],
     transcript: `Priya (PO): When an admin undoes an approval, the member should lose portal access immediately.
 Sam (Developer): Okay, I'll revoke access as part of the undo.`,
     expected: { surfaced: ['direct_disagreement'] },

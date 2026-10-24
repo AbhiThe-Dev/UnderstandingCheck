@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Badge, Button, Card, CardHeader, CardTitle, Empty } from '@/components/ui/primitives';
-import { api, type RepoRow, type Samples } from '@/lib/api';
+import { Badge, Button, Card, CardHeader, CardTitle, Empty, buttonVariants } from '@/components/ui/primitives';
+import { API_URL, api, type RepoRow, type Samples, type SlackStatus } from '@/lib/api';
 import { shortSha } from '@/lib/utils';
 
 interface GitHubStatus {
@@ -29,6 +29,13 @@ const STATUS_TONE: Record<RepoRow['indexingStatus'], 'green' | 'red' | 'amber' |
   pending: 'amber',
 };
 
+const SLACK_ERRORS: Record<string, string> = {
+  access_denied: 'Slack access was not granted.',
+  state_mismatch: 'That Slack sign-in link expired or was not started here. Try Connect again.',
+  exchange_failed: 'Slack did not accept the sign-in. Check the client ID, secret and redirect URL.',
+  not_configured: 'Slack is not configured on the server.',
+};
+
 function ago(iso: string | null) {
   if (!iso) return 'never';
   const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
@@ -44,6 +51,9 @@ export default function ReposPage() {
   const [hosted, setHosted] = useState<HostedRepo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [slack, setSlack] = useState<SlackStatus | null>(null);
+
+  const loadSlack = useCallback(() => api<SlackStatus>('/api/slack/status').then(setSlack, () => undefined), []);
 
   const load = useCallback(async () => {
     try {
@@ -61,14 +71,25 @@ export default function ReposPage() {
     }
   }, []);
 
+  // Slack sends the browser back here with ?slack=connected or ?slack=error&reason=…
   useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const result = q.get('slack');
+    if (!result) return;
+    if (result === 'connected') setNotice('Slack connected.');
+    else setError(SLACK_ERRORS[q.get('reason') ?? ''] ?? `Slack connection failed (${q.get('reason') ?? 'unknown'}).`);
+    window.history.replaceState(null, '', window.location.pathname);
+  }, []);
+
+  useEffect(() => {
+    void loadSlack();
     void load();
     api<Samples>('/api/samples').then(setSamples, () => undefined);
     api<GitHubStatus>('/api/github/status').then((s) => {
       setGithub(s);
       if (s.configured) void loadHosted();
     }, () => undefined);
-  }, [load, loadHosted]);
+  }, [load, loadHosted, loadSlack]);
 
   // Poll while anything is indexing so progress stays visible.
   useEffect(() => {
@@ -206,6 +227,49 @@ export default function ReposPage() {
                     Removing a repository from the app’s installation deletes its cached code here on the next check.
                   </p>
                 </>
+              )}
+            </div>
+          </Card>
+
+          <Card data-testid="slack-card">
+            <CardHeader>
+              <CardTitle>Connect Slack</CardTitle>
+              <Badge tone={slack?.connected ? 'green' : slack?.problem ? 'red' : 'neutral'}>
+                {slack?.connected ? 'connected' : slack?.configured ? 'not connected' : 'not configured'}
+              </Badge>
+            </CardHeader>
+            <div className="space-y-3 px-4 py-3 text-sm">
+              {!slack && <p className="text-xs text-[var(--color-muted)]">Checking…</p>}
+              {slack && !slack.configured && <p className="text-xs text-[var(--color-muted)]">{slack.message}</p>}
+              {slack?.connected && (
+                <p className="text-xs">
+                  {slack.source === 'env' ? 'Using the token from SLACK_USER_TOKEN.' : `Connected to ${slack.team} as ${slack.user}.`}{' '}
+                  Searches {slack.privateAccess ? 'public channels, private channels you are in, and your DMs' : 'public channels'}.
+                </p>
+              )}
+              {slack?.problem && <p className="text-xs text-red-600">{slack.problem}</p>}
+              {slack?.configured && slack.canConnect && (
+                <div className="flex gap-2">
+                  <a href={`${API_URL}/api/slack/connect`} className={buttonVariants({ size: 'sm' })} data-testid="slack-connect">
+                    {slack.connected && slack.source === 'oauth' ? 'Reconnect' : 'Connect Slack'}
+                  </a>
+                  {slack.source === 'oauth' && (
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={() => confirm('Disconnect Slack? The token is revoked and deleted.') && run(() => api('/api/slack', { method: 'DELETE' }), () => 'Slack disconnected.').then(loadSlack)}
+                    >
+                      Disconnect
+                    </Button>
+                  )}
+                </div>
+              )}
+              {slack?.configured && (
+                <p className="text-[11px] leading-relaxed text-[var(--color-muted)]">
+                  During meetings the copilot searches Slack for the topic under discussion and links what it finds. Message text is sent to the analyzer (OpenAI when the AI
+                  analyzer is on) but is never stored here: suggestions, summaries and records keep only links. Messages from private channels and DMs are shown without
+                  channel or author names, and their excerpts stay hidden until you reveal them.
+                </p>
               )}
             </div>
           </Card>

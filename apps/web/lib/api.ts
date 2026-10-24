@@ -60,6 +60,8 @@ export interface SessionView {
   replay: ReplayInfo | null;
   capture: CaptureInfo | null;
   metrics: SessionMetrics;
+  /** Text of Slack messages the copilot is using, from server memory only (never stored). */
+  slackExcerpts?: { id: string; text: string }[];
 }
 
 export interface SessionMeta {
@@ -120,6 +122,7 @@ export interface RecordVersion {
   description: string;
   acceptanceCriteria: string[];
   codeRefs: import('@uc/core').CodeRef[];
+  slackRefs?: import('@uc/core').SlackCitation[];
   evidence: import('@uc/core').RecordEvidence[];
   evidenceRedacted: boolean;
   confirmedBy: string[];
@@ -166,4 +169,17 @@ export interface PublishedRecord {
   version: number;
   outcome: 'created' | 'superseded' | 'reaffirmed';
   title: string;
+}
+
+export interface SlackStatus {
+  configured: boolean;
+  canConnect: boolean;
+  connected: boolean;
+  source?: 'oauth' | 'env' | null;
+  team?: string | null;
+  user?: string | null;
+  scopes?: string[];
+  privateAccess?: boolean;
+  problem?: string | null;
+  message?: string;
 }

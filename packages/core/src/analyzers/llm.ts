@@ -1,4 +1,4 @@
-import { estimateCostUsd, type EngineConfig, type ModelPrice } from '../config';
+import { DEFAULT_CONFIG, estimateCostUsd, type EngineConfig, type ModelPrice } from '../config';
 import type {
   AnalysisContext,
   Analyzer,
@@ -25,6 +25,7 @@ import {
   SYSTEM_BASE,
   renderDiscrepancy,
   renderEvidence,
+  renderSlack,
   renderState,
 } from './prompts';
 
@@ -86,9 +87,10 @@ export class LlmAnalyzer implements Analyzer {
     }
   }
 
-  async generateCandidates({ ctx, analysis, evidence }: CandidateInput): Promise<RawCandidate[]> {
+  async generateCandidates({ ctx, analysis, evidence, slack = [] }: CandidateInput): Promise<RawCandidate[]> {
+    // Slack only arrives when it shares terms with this segment (the engine filters it), so it can justify a call.
     const interesting =
-      evidence.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
+      evidence.length > 0 || slack.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
     if (!interesting) return [];
     let out;
     try {
@@ -96,7 +98,9 @@ export class LlmAnalyzer implements Analyzer {
         operation: 'candidates',
         tier: 'reasoning',
         system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`,
-        user: `${renderState(ctx.state)}\n\nNewest segment id: ${ctx.segment.id}\n\nRetrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}`,
+        user: `${renderState(ctx.state)}\n\nNewest segment id: ${ctx.segment.id}\n\nRetrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
+          slack.length > 0 ? `\n\nSlack messages (earlier discussion):\n${renderSlack(slack, DEFAULT_CONFIG.retrieval.slackBudgetTokens * 4)}` : ''
+        }`,
         schema: CandidateSchema,
         schemaName: 'discrepancy_candidates',
         maxOutputTokens: this.opts.limits.maxOutputTokens.candidates,
@@ -111,6 +115,7 @@ export class LlmAnalyzer implements Analyzer {
       description: c.description,
       quotes: c.quotes,
       codeRefs: c.codeRefs,
+      slackRefs: c.slackRefs,
       interpretations: c.interpretations.map((i) => ({ ...i, keywords: [] })),
       consequence: c.consequence,
       impactExplanation: c.impactExplanation,
@@ -124,7 +129,8 @@ export class LlmAnalyzer implements Analyzer {
             interpretationId: p.interpretationId,
             provenance: p.explicit ? 'explicit' : 'inferred',
             segmentId: p.segmentId,
-            text: ctx.state.claims.find((cl) => cl.segmentId === p.segmentId)?.text ?? '',
+            // Slack positions show the pointer, never the message.
+            text: slack.find((s) => s.claim.participantId === p.participantId)?.pointer ?? ctx.state.claims.find((cl) => cl.segmentId === p.segmentId)?.text ?? '',
           }),
         ),
       meta: { kind: 'llm', linkTerms: contentTerms(`${c.title} ${c.interpretations.map((i) => i.label).join(' ')}`).join(' ') },

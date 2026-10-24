@@ -3,8 +3,9 @@
 import Link from 'next/link';
 import { ChevronDown, Ear, Lock, Maximize2, Monitor } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import type { Discrepancy } from '@uc/core';
+import { SLACK_WINDOW_MS, type Discrepancy } from '@uc/core';
 import { CodeLink } from '@/components/CodeLink';
+import { SlackExcerpt } from '@/components/SlackLink';
 import { Avatar } from '@/components/ui/Avatar';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
 import { Transcript } from '@/components/session/Transcript';
@@ -32,6 +33,11 @@ export function LivePanel(props: { id: string; data: SessionResponse; connected:
   const focusEv = focusCurrent ? state.evidence.find((e) => e.id === state.focus!.evidenceId) : null;
   const feature = state.feature.provenance !== 'inferred' ? state.feature.description : null;
   const screen = onScreen(state, segments);
+  // Slack results still counting as context, newest search first.
+  const slackNow =
+    state.slack && lastAt - state.slack.at <= SLACK_WINDOW_MS
+      ? state.slack.refIds.flatMap((rid) => state.slackRefs?.filter((r) => r.id === rid) ?? []).slice(0, 3)
+      : [];
   const speaker = (pid: string) => state.participants.find((p) => p.id === pid);
   const card = (d: Discrepancy, readOnly = ended, canRate?: boolean) => (
     <SuggestionCard
@@ -141,6 +147,15 @@ export function LivePanel(props: { id: string; data: SessionResponse; connected:
               </ul>
             </div>
           )}
+        </section>
+      )}
+
+      {slackNow.length > 0 && (
+        <section className="space-y-2 rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3" data-testid="from-slack">
+          <h2 className="text-[11px] font-semibold tracking-wide text-[var(--color-muted)] uppercase">From Slack</h2>
+          {slackNow.map((r) => (
+            <SlackExcerpt key={r.id} r={r} text={data.slackExcerpts?.find((x) => x.id === r.id)?.text} />
+          ))}
         </section>
       )}
 

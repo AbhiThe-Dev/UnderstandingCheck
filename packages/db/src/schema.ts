@@ -140,6 +140,8 @@ export const meetingSessions = pgTable(
     githubIssue: jsonb('github_issue').$type<{ number: number; title: string; state: string; url: string; bodyExcerpt: string }>(),
     /** When this session's confirmed decisions were written to requirement records (once). */
     recordsPublishedAt: timestamp('records_published_at', { withTimezone: true }),
+    /** Which Slack conversations this session may search; null (older sessions) means off. */
+    slackMode: text('slack_mode', { enum: ['off', 'public', 'all'] }),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp('ended_at', { withTimezone: true }),
     createdAt: createdAt(),
@@ -289,6 +291,8 @@ export const requirementVersions = pgTable(
     description: text('description').notNull(),
     acceptanceCriteria: jsonb('acceptance_criteria').$type<string[]>().notNull(),
     codeRefs: jsonb('code_refs').notNull(),
+    /** Links to Slack messages behind the decision (Slack's terms forbid storing their text). */
+    slackRefs: jsonb('slack_refs').notNull().default([]),
     /** Quotes and scenario answers with speaker names; emptied if the source session is deleted. */
     evidence: jsonb('evidence').notNull(),
     evidenceRedacted: boolean('evidence_redacted').notNull().default(false),
@@ -304,3 +308,25 @@ export const requirementVersions = pgTable(
   },
   (t) => [uniqueIndex('versions_record_version').on(t.recordId, t.version), index('versions_session').on(t.sessionId)],
 );
+
+/**
+ * One Slack user token per workspace, encrypted by the API before it reaches the database. Slack's
+ * terms forbid storing what search returns, so there is deliberately no table for messages.
+ */
+export const slackConnections = pgTable('slack_connections', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id')
+    .notNull()
+    .unique()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  teamId: text('team_id').notNull(),
+  teamName: text('team_name').notNull(),
+  slackUserId: text('slack_user_id').notNull(),
+  userName: text('user_name').notNull(),
+  scopes: jsonb('scopes').$type<string[]>().notNull(),
+  tokenCiphertext: text('token_ciphertext').notNull(),
+  /** `revoked`: Slack rejected the token; searches stop until the user connects again. */
+  status: text('status', { enum: ['connected', 'revoked'] }).notNull().default('connected'),
+  statusDetail: text('status_detail'),
+  connectedAt: createdAt(),
+});

@@ -22,6 +22,13 @@
       "when": 1792693391551,
       "tag": "0002_github_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792879617476,
+      "tag": "0003_slack",
+      "breakpoints": true
     }
   ]
 }

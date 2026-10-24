@@ -18,13 +18,18 @@ import {
   createLlmProviderFromEnv,
   createRecallClientFromEnv,
   createRepoHostFromEnv,
+  createSlackFromEnv,
   type LiveTranscriber,
   type RecallClient,
   type RepoHost,
+  type SlackClient,
 } from '@uc/providers';
 import { CaptureManager } from './capture';
 import { GitHubSync, issueToFeature, parseIssueRef, refOf } from './github';
 import { ReplayManager } from './replay';
+import { SecretBox } from './secrets';
+import { SlackLink } from './slack';
+import { SlackContext, type SlackContextOptions } from './slackContext';
 
 export type AnalyzerMode = 'heuristic' | 'llm';
 
@@ -38,6 +43,14 @@ export interface ServicesOptions {
   recall?: RecallClient | null;
   /** Live transcription for microphone capture; defaults to OpenAI when OPENAI_API_KEY is set. */
   transcriber?: (() => LiveTranscriber) | null;
+  /** Slack search client; defaults to SLACK_CLIENT_ID/SECRET (or SLACK_USER_TOKEN) from the environment. */
+  slack?: SlackClient | null;
+  /** Token for search without OAuth; defaults to SLACK_USER_TOKEN. */
+  slackUserToken?: string;
+  /** Encrypts stored secrets; defaults to UC_SECRET_KEY or a key file next to the data directory. */
+  secrets?: SecretBox;
+  /** Throttles for Slack searches (tests shorten them). */
+  slackContext?: Partial<SlackContextOptions>;
 }
 
 export interface SessionSnapshot {
@@ -59,13 +72,27 @@ export class Services {
   readonly replays: ReplayManager;
   readonly github: GitHubSync | null;
   readonly capture: CaptureManager;
+  readonly slack: SlackLink | null;
+  readonly slackContext: SlackContext | null;
 
   private constructor(
     readonly store: WorkspaceStore,
     readonly analyzerMode: AnalyzerMode,
     readonly host: RepoHost | null,
     capture: { recall: RecallClient | null; transcriber: (() => LiveTranscriber) | null },
+    slack: SlackLink | null,
+    slackOpts: Partial<SlackContextOptions> = {},
   ) {
+    this.slack = slack;
+    this.slackContext = slack
+      ? new SlackContext(
+          slack,
+          async (id, messages) => {
+            await this.run(id, async (engine) => engine.observeSlack(messages));
+          },
+          slackOpts,
+        )
+      : null;
     this.replays = new ReplayManager(this, (status, message) => new HttpError(status, message));
     this.github = host ? new GitHubSync(store, host) : null;
     this.capture = new CaptureManager(this, capture, (status, message) => new HttpError(status, message));
@@ -89,7 +116,12 @@ export class Services {
     const recall = opts.recall !== undefined ? opts.recall : createRecallClientFromEnv();
     const apiKey = process.env.OPENAI_API_KEY;
     const transcriber = opts.transcriber !== undefined ? opts.transcriber : apiKey ? () => new OpenAiLiveTranscriber({ apiKey }) : null;
-    return new Services(new WorkspaceStore(db, ws.id), mode, host, { recall, transcriber });
+    const store = new WorkspaceStore(db, ws.id);
+    const slackClient = opts.slack !== undefined ? opts.slack : createSlackFromEnv();
+    const envToken = opts.slackUserToken ?? process.env.SLACK_USER_TOKEN;
+    const canConnect = opts.slack !== undefined ? !!opts.slack : !!(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
+    const slack = slackClient ? new SlackLink(store, slackClient, opts.secrets ?? SecretBox.fromEnv(opts.dataDir), { canConnect, envToken }) : null;
+    return new Services(store, mode, host, { recall, transcriber }, slack, opts.slackContext);
   }
 
   // ---------------- GitHub
@@ -204,6 +236,8 @@ export class Services {
     priorDecisions?: PriorDecision[];
     /** Check the discussion against the repository's active requirement records (default true). */
     includeRecords?: boolean;
+    /** Slack conversations to search; defaults to everything the connected token allows. */
+    slackMode?: 'off' | 'public' | 'all';
   }) {
     let priors = input.priorDecisions ?? [];
     let featureDescription = input.featureDescription ?? null;
@@ -228,7 +262,7 @@ export class Services {
         }
       }
     }
-    const row = await this.store.createSession({ ...input, featureDescription, githubIssue, analyzer: this.analyzerMode });
+    const row = await this.store.createSession({ ...input, featureDescription, githubIssue, analyzer: this.analyzerMode, slackMode: await this.slackModeFor(input.slackMode) });
     const deps = await this.depsFor(row);
     const { engine } = await SessionEngine.create(
       { sessionId: row.id, featureDescription: featureDescription ?? undefined, priorDecisions: priors },
@@ -236,7 +270,16 @@ export class Services {
     );
     this.engines.set(row.id, engine);
     await this.store.saveSessionState(row.id, engine.state, engine.segments);
+    if (this.slackContext) void this.slackContext.prefetch(row).catch(() => undefined);
     return row;
+  }
+
+  /** Narrow the requested Slack mode to what the connection allows. */
+  private async slackModeFor(requested: 'off' | 'public' | 'all' | undefined): Promise<'off' | 'public' | 'all'> {
+    const creds = this.slack ? await this.slack.credentials() : null;
+    if (!creds || requested === 'off') return 'off';
+    if (requested === 'public' || creds.maxScope === 'public') return 'public';
+    return 'all';
   }
 
   private async engineFor(id: string): Promise<{ engine: SessionEngine; row: SessionRow }> {
@@ -260,10 +303,16 @@ export class Services {
       await this.store.saveSessionState(id, engine.state, engine.segments, opts);
       const snapshot: SessionSnapshot = { state: engine.state, segments: engine.segments, status: opts.ended ? 'ended' : row.status };
       for (const l of this.listeners.get(id) ?? []) l(snapshot, events);
+      if (!opts.ended) this.slackContext?.onRun(row, events, engine.state);
       return { events, snapshot };
     });
     this.queues.set(id, next);
     return next;
+  }
+
+  /** Text of Slack messages the session's engine holds in memory, for the live panel. Never read from the database. */
+  slackExcerpts(id: string): { id: string; text: string }[] {
+    return this.engines.get(id)?.slackExcerpts() ?? [];
   }
 
   async snapshot(id: string): Promise<SessionSnapshot & { row: SessionRow }> {
@@ -291,6 +340,7 @@ export class Services {
     this.replays.forget(id);
     this.capture.stop(id);
     await this.store.deleteSession(id);
+    this.slackContext?.forget(id);
     this.engines.delete(id);
     this.listeners.delete(id);
   }

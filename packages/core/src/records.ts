@@ -1,4 +1,4 @@
-import type { CodeRef, Requirement, SessionState } from './types';
+import type { CodeRef, Requirement, SessionState, SlackCitation } from './types';
 import { truncate } from './text';
 
 export interface RecordEvidence {
@@ -14,6 +14,8 @@ export interface RecordDraft {
   description: string;
   acceptanceCriteria: string[];
   codeRefs: CodeRef[];
+  /** Links to Slack messages behind the decision (never their text). */
+  slackRefs: SlackCitation[];
   confirmation: Requirement['confirmation'];
   confirmedBy: string[];
   evidence: RecordEvidence[];
@@ -45,6 +47,7 @@ export function recordDrafts(state: SessionState): RecordDraft[] {
         description: r.description,
         acceptanceCriteria: r.acceptanceCriteria,
         codeRefs: r.codeRefs,
+        slackRefs: r.slackRefs ?? [],
         confirmation: r.confirmation,
         confirmedBy: r.confirmedBy.filter((id) => !id.startsWith('prior:')).map(name),
         evidence: r.evidence

@@ -11,6 +11,7 @@ import {
   repositories,
   repositoryFiles,
   requirements,
+  slackConnections,
   transcriptSegments,
   users,
   workspaces,
@@ -21,6 +22,7 @@ import { searchColumns } from './symbolSearch';
 export type RepositoryRow = typeof repositories.$inferSelect;
 export type SessionRow = typeof meetingSessions.$inferSelect;
 export type UsageRow = typeof aiUsage.$inferSelect;
+export type SlackConnectionRow = typeof slackConnections.$inferSelect;
 
 const DEMO_WORKSPACE = 'Demo workspace';
 
@@ -204,6 +206,7 @@ export class WorkspaceStore {
     githubIssue?: SessionRow['githubIssue'];
     analyzer: string;
     consentConfirmed: boolean;
+    slackMode?: 'off' | 'public' | 'all';
   }): Promise<SessionRow> {
     if (input.repositoryId && !(await this.getRepository(input.repositoryId))) throw new Error('Repository not found');
     const [s] = await this.db
@@ -216,6 +219,7 @@ export class WorkspaceStore {
         githubIssueReference: input.githubIssueReference ?? null,
         githubIssue: input.githubIssue ?? null,
         analyzer: input.analyzer,
+        slackMode: input.slackMode ?? 'off',
         consentConfirmedAt: input.consentConfirmed ? new Date() : null,
       })
       .returning();
@@ -403,5 +407,27 @@ export class WorkspaceStore {
       record: (u) => this.recordUsage({ ...u, sessionDbId }),
       spentUsd: () => this.spentThisMonthUsd(),
     };
+  }
+
+  // ---------------- slack
+
+  async slackConnection(): Promise<SlackConnectionRow | null> {
+    const [r] = await this.db.select().from(slackConnections).where(eq(slackConnections.workspaceId, this.workspaceId));
+    return r ?? null;
+  }
+
+  /** Replace the workspace's Slack connection (one per workspace). `tokenCiphertext` is already encrypted. */
+  async saveSlackConnection(c: Omit<typeof slackConnections.$inferInsert, 'id' | 'workspaceId' | 'connectedAt' | 'status' | 'statusDetail'>): Promise<SlackConnectionRow> {
+    await this.deleteSlackConnection();
+    const [r] = await this.db.insert(slackConnections).values({ ...c, workspaceId: this.workspaceId }).returning();
+    return r!;
+  }
+
+  async markSlackRevoked(detail: string) {
+    await this.db.update(slackConnections).set({ status: 'revoked', statusDetail: detail }).where(eq(slackConnections.workspaceId, this.workspaceId));
+  }
+
+  async deleteSlackConnection() {
+    await this.db.delete(slackConnections).where(eq(slackConnections.workspaceId, this.workspaceId));
   }
 }

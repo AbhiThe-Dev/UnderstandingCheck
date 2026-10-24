@@ -18,7 +18,7 @@ const app = createApp(services);
 const server = serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, () => {
   const cap = services.capture.config();
   console.log(
-    `[api] listening on http://127.0.0.1:${port} · analyzer=${services.analyzerMode} · github=${services.host ? 'app configured' : 'off'} · recall=${cap.recall.configured ? cap.recall.region : 'off'} · mic=${cap.microphone.configured ? 'on' : 'off'} · data=${dataDir}`,
+    `[api] listening on http://127.0.0.1:${port} · analyzer=${services.analyzerMode} · github=${services.host ? 'app configured' : 'off'} · recall=${cap.recall.configured ? cap.recall.region : 'off'} · mic=${cap.microphone.configured ? 'on' : 'off'} · slack=${services.slack ? 'configured' : 'off'} · data=${dataDir}`,
   );
 });
 app.injectWebSocket(server);

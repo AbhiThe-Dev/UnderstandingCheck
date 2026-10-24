@@ -71,6 +71,20 @@ Create a GitHub App (read-only **Contents**, **Metadata**, **Issues**, **Pull re
 
 Endpoints: `GET /api/github/status`, `GET /api/github/repositories`, `POST /api/repos/github {fullName}`, `POST /api/repos/:id/sync`.
 
+### Slack context
+
+During a meeting the copilot searches Slack for the topic under discussion, using Slack's Real-time Search API (`assistant.search.context`) with the connected user's token. A statement on the call that contradicts a decision found in Slack is raised like a conflict with an earlier requirement record, with a link to the Slack message.
+
+Setup: create a Slack app from `apps/api/slack-app-manifest.json` at <https://api.slack.com/apps>, install it to your workspace, and put `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` in `.env`. Then use **Repositories → Connect Slack**. Real-time Search is only available to **internal** apps (installed in your own workspace) and Slack Marketplace apps. An internal app's "User OAuth Token" in `SLACK_USER_TOKEN` also works, without Connect.
+
+- **Scopes:** user scopes `search:read.public`, `search:read.private`, `search:read.im`, `search:read.mpim`. Search sees only what the connected user can see. Each session picks *public only*, *public, private channels and DMs*, or *off*.
+- **Nothing from Slack is stored.** Slack's terms forbid storing what search returns. Message text lives only in the running engine's memory, is sent to the analyzer (OpenAI with `ANALYZER=llm`), and is shown live in the call panel. Saved state, suggestions, summaries, exports and requirement records keep only a reference: permalink, channel, author and date. After an API restart the excerpts are gone, and the links remain.
+- **Private channels and DMs** are referenced as "Slack private conversation (date)", with no channel or author name stored. Their excerpts in the panel stay hidden until revealed. Slack itself checks who can open the permalink.
+- **When it searches:** once at session start (title, feature, linked issue), then when the code in focus changes or every few turns. At most 6 Slack calls per minute (Slack allows about 10 per user), at least 20 s apart per session, 30 searches per session. A full search is two Slack calls (public, then private conversations).
+- **Token:** encrypted with AES-256-GCM before it is stored. The key comes from `UC_SECRET_KEY`, else a `secret.key` file (mode 600) next to the data directory. **Disconnect** revokes the token at Slack and deletes it. A token Slack rejects marks the connection revoked and stops all searches.
+
+Endpoints: `GET /api/slack/status`, `GET /api/slack/connect` (redirects to Slack), `GET /api/slack/oauth/callback`, `DELETE /api/slack`.
+
 ### Meeting capture (Phase 4)
 
 Two capture sources feed the same pipeline as replays and the streaming endpoint. Both start only from an explicit action with consent confirmed, show a visible recording indicator, and never speak into the meeting.
@@ -130,6 +144,10 @@ Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requ
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` | — | GitHub App credentials (`GITHUB_APP_PRIVATE_KEY` inline also works). Loaded from `.env` |
 | `GITHUB_SYNC_INTERVAL_MINUTES` | `5` | How often connected repositories are checked for new commits; `0` disables |
 | `RECALL_API_KEY`, `RECALL_REGION` | — | Recall.ai Desktop SDK for meeting capture (`us-west-2` = pay-as-you-go) |
+| `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | — | Slack app credentials for **Connect Slack** |
+| `SLACK_REDIRECT_URL` | `http://localhost:4000/api/slack/oauth/callback` | Must match the Redirect URL in the Slack app |
+| `SLACK_USER_TOKEN` | — | An internal Slack app's user token, used when nobody connected through OAuth |
+| `UC_SECRET_KEY` | key file next to the data directory | Encrypts stored secrets (the Slack token) |
 | `UC_TRANSCRIPTION_PRICES_JSON` | built-in | Per-minute transcription price override, e.g. `{"gpt-live-transcribe":0.017}` |
 | `UC_API_URL`, `UC_WEB_URL` | `http://127.0.0.1:4000`, `http://localhost:3000` | Where the desktop app finds the API and web app |
 
@@ -169,7 +187,8 @@ Two analyzers implement the same interface. **`HeuristicAnalyzer`** is rule-base
 - Workspace-scoped data access (`WorkspaceStore`) — every query is bound to a workspace; covered by tests.
 - Consent is required to create a session; the live screen shows a visible transcription indicator. Only transcript text is stored (no audio). Sessions (and their transcripts) can be deleted; transcript retention can be configured.
 - Repository text and transcripts are wrapped as untrusted data in prompts; credentials are redacted from code before any model call; request bodies are never logged.
-- No secrets are stored yet (GitHub App credentials are Phase 3).
+- The only stored secret is the Slack user token, encrypted at rest (see *Slack context*). GitHub App credentials stay in files outside the database.
+- Slack message text is never written to the database, exports or logs; only references are.
 
 ## Evaluation (heuristic analyzer)
 

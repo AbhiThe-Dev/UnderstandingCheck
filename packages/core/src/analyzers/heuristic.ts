@@ -139,7 +139,7 @@ export class HeuristicAnalyzer implements Analyzer {
   }
 
   // ---- Rule: direct disagreement (incl. conflicts with prior decisions) ----
-  private directDisagreement({ ctx, claim, evidence }: CandidateInput): RawCandidate | null {
+  private directDisagreement({ ctx, claim, evidence, slack = [] }: CandidateInput): RawCandidate | null {
     const claimStance = stance(claim);
     if (claim.ambiguousSpeaker || claimStance === 'neutral' || claim.kinds.includes('question')) return null;
     if (claim.kinds.includes('agreement') && !claim.kinds.includes('disagreement')) return null;
@@ -157,7 +157,9 @@ export class HeuristicAnalyzer implements Analyzer {
       .slice(-8)
       .reverse();
     const priorDecisions = state.claims.filter((c) => c.participantId.startsWith('prior:'));
-    for (const other of [...prior, ...priorDecisions]) {
+    // Slack messages are earlier decisions whose text must not be copied into the suggestion.
+    const fromSlack = new Map(slack.map((s) => [s.claim.participantId, s]));
+    for (const other of [...prior, ...priorDecisions, ...slack.map((s) => s.claim)]) {
       const otherStance = stance(other);
       if (otherStance === 'neutral' || otherStance === claimStance) continue;
       if (!other.kinds.some((k) => k === 'requirement' || k === 'proposal' || k === 'disagreement')) continue;
@@ -180,18 +182,29 @@ export class HeuristicAnalyzer implements Analyzer {
       const relevant = isPrior
         ? [other.participantId, claim.participantId, ...(owner ? [owner.id] : []), ...speakers]
         : [claim.participantId, other.participantId];
+      const slackItem = fromSlack.get(other.participantId);
+      const shownText = (c: Claim) => fromSlack.get(c.participantId)?.pointer ?? c.text;
+      const labels = { A: `Include the ${topicWord}`, B: `No ${topicWord}` };
+      const behavior = (c: Claim, id: 'A' | 'B') => {
+        const s = fromSlack.get(c.participantId);
+        return s ? `${labels[id]}, as decided in ${s.pointer}` : quoteOf(c.text);
+      };
       const positions: Position[] = [
-        { participantId: positive.participantId, interpretationId: 'A', provenance: 'explicit', segmentId: positive.segmentId, text: positive.text },
-        { participantId: negative.participantId, interpretationId: 'B', provenance: 'explicit', segmentId: negative.segmentId, text: negative.text },
+        { participantId: positive.participantId, interpretationId: 'A', provenance: 'explicit', segmentId: positive.segmentId, text: shownText(positive) },
+        { participantId: negative.participantId, interpretationId: 'B', provenance: 'explicit', segmentId: negative.segmentId, text: shownText(negative) },
       ];
       const interpretations: Interpretation[] = [
-        { id: 'A', label: `Include the ${topicWord}`, behavior: quoteOf(positive.text), keywords: [] },
-        { id: 'B', label: `No ${topicWord}`, behavior: quoteOf(negative.text), keywords: [] },
+        { id: 'A', label: labels.A, behavior: behavior(positive, 'A'), keywords: [] },
+        { id: 'B', label: labels.B, behavior: behavior(negative, 'B'), keywords: [] },
       ];
       return {
         key: `disagree:${[...overlap].sort().join('+')}`,
         category: 'direct_disagreement',
-        title: isPrior ? `Conflicts with an earlier decision about the ${topicWord}` : `Different positions on the ${topicWord}`,
+        title: slackItem
+          ? `Conflicts with an earlier Slack decision about the ${topicWord}`
+          : isPrior
+            ? `Conflicts with an earlier decision about the ${topicWord}`
+            : `Different positions on the ${topicWord}`,
         description: isPrior
           ? `${participantName(state, claim.participantId)}'s statement conflicts with an earlier decision (${participantName(state, other.participantId)}).`
           : `${participantName(state, positive.participantId)} and ${participantName(state, negative.participantId)} described incompatible behavior for the ${topicWord}.`,
@@ -208,6 +221,7 @@ export class HeuristicAnalyzer implements Analyzer {
               },
             ]
           : [],
+        ...(slackItem ? { slackRefs: [{ refId: slackItem.ref.id, note: 'Earlier decision in Slack' }] } : {}),
         interpretations,
         consequence: relatedEffect ? relatedEffect.e.category : 'business_rule',
         impactExplanation: 'Both behaviors cannot be implemented at once; the implementation will match only one participant.',

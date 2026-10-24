@@ -1,9 +1,9 @@
-import type { RawCandidate } from './ports';
-import type { CodeEvidence, CodeRef, Quote, Segment } from './types';
+import type { RawCandidate, SlackContextItem } from './ports';
+import type { CodeEvidence, CodeRef, Quote, Segment, SlackCitation } from './types';
 import { normalizeForMatch, quoteAppearsIn } from './text';
 
 export type ValidationResult =
-  | { ok: true; quotes: Quote[]; codeRefs: CodeRef[] }
+  | { ok: true; quotes: Quote[]; codeRefs: CodeRef[]; slackRefs: SlackCitation[] }
   | { ok: false; reason: string; detail: string };
 
 /**
@@ -11,6 +11,7 @@ export type ValidationResult =
  * - every code citation must resolve to evidence actually retrieved at the session's commit,
  *   with line numbers inside that symbol's range;
  * - every quote must be a real substring of a real segment by the stated participant;
+ * - every Slack citation must be a message handed to the analyzer for this candidate;
  * - a candidate must offer at least two interpretations that describe different behavior.
  * Candidates failing any check are dropped (never "repaired" into a claim the evidence does not support).
  */
@@ -19,6 +20,7 @@ export function validateCandidate(
   evidence: CodeEvidence[],
   segments: Map<string, Segment>,
   commitSha: string,
+  slack: SlackContextItem[] = [],
 ): ValidationResult {
   const quotes: Quote[] = [];
   for (const q of c.quotes) {
@@ -58,6 +60,13 @@ export function validateCandidate(
       note: r.note,
     });
   }
+  const slackRefs: SlackCitation[] = [];
+  for (const r of c.slackRefs ?? []) {
+    const item = slack.find((s) => s.ref.id === r.refId);
+    if (!item) return { ok: false, reason: 'unknown_slack_message', detail: `cites ${r.refId}, which was not in this Slack context` };
+    if (!slackRefs.some((x) => x.id === item.ref.id)) slackRefs.push({ ...item.ref, note: r.note });
+  }
+
   if (['codebase_conflict', 'hidden_assumption'].includes(c.category) && codeRefs.length === 0) {
     return { ok: false, reason: 'no_code_evidence', detail: `${c.category} requires a code citation` };
   }
@@ -69,5 +78,5 @@ export function validateCandidate(
   if (behaviors.size < c.interpretations.length) {
     return { ok: false, reason: 'indistinct_interpretations', detail: 'interpretations describe the same behavior' };
   }
-  return { ok: true, quotes, codeRefs };
+  return { ok: true, quotes, codeRefs, slackRefs };
 }

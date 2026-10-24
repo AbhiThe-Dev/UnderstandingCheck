@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { wordDiff } from '@uc/core';
 import { CodeLink } from '@/components/CodeLink';
+import { SlackLink } from '@/components/SlackLink';
 import { Badge, Button, Card, CardHeader, CardTitle, Input } from '@/components/ui/primitives';
 import { api, type RecordDetail, type RecordVersion } from '@/lib/api';
 
@@ -73,6 +74,18 @@ export default function RequirementDetail() {
                   <li key={`${r.filePath}:${r.startLine}`}>
                     <CodeLink htmlUrl={data.repositoryUrl} r={r} />{' '}
                     <span className="text-[var(--color-muted)]">{r.note}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {current.slackRefs && current.slackRefs.length > 0 && (
+            <div>
+              <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-muted)]">Slack</div>
+              <ul className="mt-1 space-y-0.5 text-xs">
+                {current.slackRefs.map((r) => (
+                  <li key={r.permalink}>
+                    <SlackLink r={r} note={r.note} /> <span className="text-[var(--color-muted)]">{r.note}</span>
                   </li>
                 ))}
               </ul>

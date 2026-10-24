@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Button, Card, Input, Label, Textarea } from '@/components/ui/primitives';
-import { api, type RepoRow, type Samples } from '@/lib/api';
+import { api, type RepoRow, type Samples, type SlackStatus } from '@/lib/api';
 import { shortSha } from '@/lib/utils';
 
 export default function NewSessionPage() {
@@ -17,6 +17,8 @@ export default function NewSessionPage() {
   const [sampleId, setSampleId] = useState('');
   const [consent, setConsent] = useState(false);
   const [includeRecords, setIncludeRecords] = useState(true);
+  const [slack, setSlack] = useState<SlackStatus | null>(null);
+  const [slackMode, setSlackMode] = useState<'off' | 'public' | 'all'>('all');
   const [activeRecords, setActiveRecords] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -28,6 +30,10 @@ export default function NewSessionPage() {
       if (ready) setRepositoryId(ready.id);
     }, (e: Error) => setError(e.message));
     api<Samples>('/api/samples').then(setSamples, () => undefined);
+    api<SlackStatus>('/api/slack/status').then((s) => {
+      setSlack(s);
+      if (s.connected && !s.privateAccess) setSlackMode('public');
+    }, () => undefined);
   }, []);
 
   const sample = samples?.transcripts.find((t) => t.id === sampleId);
@@ -61,6 +67,7 @@ export default function NewSessionPage() {
           consentConfirmed: consent,
           priorDecisions: sample?.priorDecisions.length ? sample.priorDecisions : undefined,
           includeRecords,
+          slackMode: slack?.connected ? slackMode : 'off',
         },
       });
       router.push(`/sessions/${id}${sampleId ? `?sample=${sampleId}` : ''}`);
@@ -124,6 +131,23 @@ export default function NewSessionPage() {
               <span className="text-[var(--color-muted)]"> ({activeRecords ?? '…'} active)</span>
             </span>
           </label>
+        )}
+        {slack?.connected && (
+          <div className="space-y-1">
+            <Label htmlFor="slack-mode">Slack context</Label>
+            <select
+              id="slack-mode"
+              value={slackMode}
+              onChange={(e) => setSlackMode(e.target.value as typeof slackMode)}
+              className="h-9 w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2 text-sm"
+              data-testid="slack-mode"
+            >
+              {slack.privateAccess && <option value="all">Public channels, private channels and DMs</option>}
+              <option value="public">Public channels only</option>
+              <option value="off">Off</option>
+            </select>
+            <p className="text-xs text-[var(--color-muted)]">Searches Slack for the topic being discussed. Only links are saved; private messages show without names.</p>
+          </div>
         )}
         <label className="flex items-start gap-2 rounded-md border border-[var(--color-line)] bg-[var(--color-canvas)] p-3 text-sm">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5" data-testid="consent" />

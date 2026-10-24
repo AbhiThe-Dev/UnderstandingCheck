@@ -1,8 +1,9 @@
 import { mergeConfig, type DeepPartial, type EngineConfig } from './config';
 import { CONSEQUENCE_WEIGHT, describeEffect } from './lexicon';
-import type { Analyzer, ClarificationPurpose, RawCandidate, SegmentAnalysis, SymbolSearch, UsageSink } from './ports';
+import type { Analyzer, ClarificationPurpose, RawCandidate, SegmentAnalysis, SlackContextItem, SymbolSearch, UsageSink } from './ports';
 import { decide, hasLiveCapacity, scoreDiscrepancy } from './prioritizer';
 import { RetrievalCache, retrieveContext, toEvidence } from './retrieval';
+import { slackPointer } from './slack';
 import { contentTerms, leadingYesNo } from './text';
 import { addPosition, consensus, firmPositions, isOpen, isPriorRecord, needsIndependentAnswer, setStatus } from './tracker';
 import type {
@@ -57,6 +58,22 @@ const CATEGORY_RANK: Record<DiscrepancyCategory, number> = {
 /** How long code seen on the shared screen keeps counting as context (meeting time). */
 export const SCREEN_WINDOW_MS = 10 * 60_000;
 
+/** How long Slack search results keep counting as context (meeting time). */
+export const SLACK_WINDOW_MS = 15 * 60_000;
+/** Slack messages kept in the window, and handed to the analyzer per segment. */
+const SLACK_WINDOW_ITEMS = 8;
+const SLACK_PER_SEGMENT = 4;
+
+/** A Slack search result handed to the engine. Its text lives only in memory. */
+export interface SlackObservation {
+  permalink: string;
+  channelName: string;
+  channelKind: 'public' | 'private' | 'dm';
+  authorName: string;
+  ts: string;
+  text: string;
+}
+
 // "Others" is several remote people sharing one audio stream (see the API's Recall capture).
 const AMBIGUOUS_SPEAKER = /^(unknown|unidentified|speaker\s*\d*|participant\s*\d+|guest|others|\?+|unattributed)$/i;
 
@@ -107,6 +124,8 @@ export class SessionEngine {
   private segMap: Map<string, Segment>;
   private cfg: EngineConfig;
   private cache: RetrievalCache;
+  /** Slack message text by ref id. Deliberately not in `state`, so it is never persisted. */
+  private slackItems = new Map<string, SlackContextItem>();
 
   private constructor(
     private deps: EngineDeps,
@@ -247,10 +266,11 @@ export class SessionEngine {
     const focusEv = this.state.focus ? this.state.evidence.find((e) => e.id === this.state.focus!.evidenceId) : undefined;
     const candidateEvidence = focusEv && !evidence.some((e) => e.id === focusEv.id) ? [...evidence, focusEv] : evidence;
 
-    const raw = await this.deps.analyzer.generateCandidates({ ctx, analysis, claim, evidence: candidateEvidence });
+    const slack = this.slackContext(analysis);
+    const raw = await this.deps.analyzer.generateCandidates({ ctx, analysis, claim, evidence: candidateEvidence, slack });
     const touched: Discrepancy[] = [];
     for (const c of raw) {
-      const d = await this.acceptCandidate(c, segment, events);
+      const d = await this.acceptCandidate(c, segment, events, slack);
       if (d) touched.push(d);
     }
     await this.settle(segment.index, events);
@@ -433,6 +453,87 @@ export class SessionEngine {
     return [{ type: 'screen_observed', evidenceIds: pooled.map((e) => e.id), files: paths }];
   }
 
+  // ------------------------------------------------------------------ slack
+
+  /**
+   * Slack messages found for this discussion (searched by the API with the user's token). Each
+   * becomes an earlier-decision pseudo participant (`prior:slack:S1`), so a statement that
+   * contradicts what was decided in Slack is raised like a conflict with a requirement record.
+   * Only references are kept in `state`; message text stays in this engine instance.
+   */
+  observeSlack(messages: SlackObservation[]): EngineEvent[] {
+    if (this.state.ended) return [];
+    const refs = (this.state.slackRefs ??= []);
+    const ids: string[] = [];
+    for (const m of messages.slice(0, SLACK_WINDOW_ITEMS)) {
+      if (!m.text.trim() || !m.permalink) continue;
+      let ref = refs.find((r) => r.permalink === m.permalink);
+      if (!ref) {
+        const isPrivate = m.channelKind !== 'public';
+        ref = {
+          id: `S${refs.length + 1}`,
+          permalink: m.permalink,
+          channelLabel: isPrivate ? 'private conversation' : `#${m.channelName.replace(/^#/, '')}`,
+          authorName: isPrivate ? null : m.authorName,
+          ts: m.ts,
+          private: isPrivate,
+        };
+        refs.push(ref);
+      }
+      const pointer = slackPointer(ref);
+      const participantId = `prior:slack:${ref.id}`;
+      let p = this.state.participants.find((x) => x.id === participantId);
+      if (!p) {
+        p = { id: participantId, displayName: pointer, role: 'stakeholder', ambiguous: false };
+        this.state.participants.push(p);
+      }
+      const text = m.text.trim().slice(0, 2000);
+      const segment = { id: `slack:${ref.id}`, index: -1, participantId, timestamp: 0, text };
+      const a = analyzeSegmentHeuristic({ state: this.state, segment, participant: p, recent: [] });
+      const claim: Claim = {
+        id: `c-slack-${ref.id}`,
+        segmentId: segment.id,
+        participantId,
+        kinds: a.kinds,
+        text,
+        terms: a.terms,
+        polarity: a.polarity,
+        provenance: 'explicit',
+        ambiguousSpeaker: false,
+      };
+      this.slackItems.set(ref.id, { ref, claim, text, pointer });
+      if (!ids.includes(ref.id)) ids.push(ref.id);
+    }
+    const now = this.segments.at(-1)?.timestamp ?? 0;
+    const prev = this.state.slack && now - this.state.slack.at <= SLACK_WINDOW_MS ? this.state.slack.refIds : [];
+    const refIds = [...ids, ...prev.filter((id) => !ids.includes(id))].slice(0, SLACK_WINDOW_ITEMS);
+    this.state.slack = { at: now, refIds };
+    return [{ type: 'slack_observed', refIds: ids }];
+  }
+
+  /** Slack messages still in the window whose topic overlaps this segment, most overlap first. */
+  private slackContext(analysis: SegmentAnalysis): SlackContextItem[] {
+    const sl = this.state.slack;
+    if (!sl) return [];
+    const now = this.segments.at(-1)?.timestamp ?? 0;
+    if (now - sl.at > SLACK_WINDOW_MS) return [];
+    const terms = new Set(analysis.terms);
+    return sl.refIds
+      .flatMap((id) => {
+        const item = this.slackItems.get(id);
+        const overlap = item ? item.claim.terms.filter((t) => terms.has(t)).length : 0;
+        return item && overlap > 0 ? [{ item, overlap }] : [];
+      })
+      .sort((a, b) => b.overlap - a.overlap)
+      .slice(0, SLACK_PER_SEGMENT)
+      .map((x) => x.item);
+  }
+
+  /** Text of the Slack messages this engine holds in memory (for the live panel; never persisted). */
+  slackExcerpts(): { id: string; text: string }[] {
+    return [...this.slackItems.values()].map((i) => ({ id: i.ref.id, text: i.text.slice(0, 280) }));
+  }
+
   /** On-screen evidence that is still recent enough to count. */
   private screenEvidence(): CodeEvidence[] {
     const sc = this.state.screen;
@@ -495,9 +596,9 @@ export class SessionEngine {
 
   // ------------------------------------------------------------------ candidates
 
-  private async acceptCandidate(c: RawCandidate, segment: Segment, events: EngineEvent[]): Promise<Discrepancy | null> {
+  private async acceptCandidate(c: RawCandidate, segment: Segment, events: EngineEvent[], slack: SlackContextItem[] = []): Promise<Discrepancy | null> {
     this.state.metrics.candidatesGenerated++;
-    const v = validateCandidate(c, this.state.evidence, this.segMap, this.state.commitSha);
+    const v = validateCandidate(c, this.state.evidence, this.segMap, this.state.commitSha, slack);
     if (!v.ok) {
       this.state.metrics.candidatesRejected++;
       this.state.metrics.rejectionReasons[v.reason] = (this.state.metrics.rejectionReasons[v.reason] ?? 0) + 1;
@@ -512,6 +613,10 @@ export class SessionEngine {
       existing.lastLinkedSegmentIndex = at;
       for (const q of v.quotes) if (!existing.statements.some((s) => s.segmentId === q.segmentId)) existing.statements.push(q);
       for (const r of v.codeRefs) if (!existing.codeRefs.some((x) => x.evidenceId === r.evidenceId && x.startLine === r.startLine)) existing.codeRefs.push(r);
+      if (v.slackRefs.length > 0) {
+        const cited = (existing.slackRefs ??= []);
+        for (const r of v.slackRefs) if (!cited.some((x) => x.id === r.id)) cited.push(r);
+      }
       for (const id of c.relevantParticipantIds) if (!existing.relevantParticipantIds.includes(id)) existing.relevantParticipantIds.push(id);
       for (const p of c.positions) {
         if (!existing.positions.some((x) => x.participantId === p.participantId && x.interpretationId === p.interpretationId && x.segmentId === p.segmentId)) existing.positions.push(p);
@@ -547,6 +652,7 @@ export class SessionEngine {
       description: c.description,
       statements: v.quotes,
       codeRefs: v.codeRefs,
+      ...(v.slackRefs.length > 0 ? { slackRefs: v.slackRefs } : {}),
       interpretations: c.interpretations,
       impact: { consequence: c.consequence, explanation: c.impactExplanation },
       impactScore: 0,
@@ -792,7 +898,8 @@ export class SessionEngine {
     const firm = [...firmPositions(d).values()].filter((p) => d.relevantParticipantIds.includes(p.participantId) && !isPriorRecord(p.participantId));
     const scenario = this.state.clarifications.find((c) => c.discrepancyId === d.id && c.scenario && c.purpose !== 'surface_difference')?.scenario;
     // An earlier record's position is fixed; the team either kept it or replaced it.
-    const prior = [...d.positions].reverse().find((p) => isPriorRecord(p.participantId));
+    // Slack messages are earlier decisions too, but not requirement records that can get a new version.
+    const prior = [...d.positions].reverse().find((p) => isPriorRecord(p.participantId) && !p.participantId.startsWith('prior:slack:'));
     const req: Requirement = {
       id: this.nextId('r'),
       lineageId: prev?.lineageId ?? `L${d.id}`,
@@ -806,6 +913,7 @@ export class SessionEngine {
       discrepancyId: d.id,
       acceptanceCriteria: [scenario ? `Given: ${scenario} Expected: ${interp.behavior}` : `Expected: ${interp.behavior}`],
       codeRefs: d.codeRefs,
+      ...(d.slackRefs?.length ? { slackRefs: d.slackRefs } : {}),
       priorRecord: prior
         ? { id: prior.participantId.slice('prior:'.length), outcome: prior.interpretationId === interpretationId ? 'reaffirms' : 'supersedes' }
         : null,

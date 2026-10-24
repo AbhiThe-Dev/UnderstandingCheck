@@ -14,6 +14,7 @@ import type {
   Position,
   Segment,
   SessionState,
+  SlackRef,
 } from './types';
 
 // ---------- Code search (implemented by @uc/indexer in memory and @uc/db with Postgres FTS) ----------
@@ -113,6 +114,8 @@ export interface RawCandidate {
   description: string;
   quotes: { segmentId: string; quote: string }[];
   codeRefs: { evidenceId: string; startLine: number; endLine: number; note: string }[];
+  /** Slack messages the candidate rests on, by ref id (S1…) from `CandidateInput.slack`. */
+  slackRefs?: { refId: string; note: string }[];
   interpretations: Interpretation[];
   consequence: EffectCategory | 'business_rule';
   impactExplanation: string;
@@ -127,6 +130,20 @@ export interface CandidateInput {
   analysis: SegmentAnalysis;
   claim: Claim;
   evidence: CodeEvidence[];
+  /** Slack messages relevant to this segment. Their text is for analysis only and must not be copied into output. */
+  slack?: SlackContextItem[];
+}
+
+/**
+ * One Slack message as the analyzer sees it. `claim.participantId` is a `prior:slack:*` pseudo
+ * participant, so Slack decisions behave like earlier recorded decisions. `pointer` is what output
+ * may show in place of the text ("Slack #approvals (Dana, Oct 12)").
+ */
+export interface SlackContextItem {
+  ref: SlackRef;
+  claim: Claim;
+  text: string;
+  pointer: string;
 }
 
 export interface ClarificationDraft {

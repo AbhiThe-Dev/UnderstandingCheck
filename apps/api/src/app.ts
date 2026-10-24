@@ -36,6 +36,7 @@ const SessionBody = z.object({
   consentConfirmed: z.literal(true, { error: 'Participants must be told the discussion is transcribed and analyzed' }),
   priorDecisions: z.array(z.object({ id: z.string().max(60), description: z.string().max(500), source: z.string().max(100) })).max(20).optional(),
   includeRecords: z.boolean().optional(),
+  slackMode: z.enum(['off', 'public', 'all']).optional(),
 });
 
 const ActionBody = z.object({ action: z.enum(['ask_now', 'dismiss', 'save_for_later', 'restore', 'mark_useful', 'mark_not_useful']) });
@@ -87,6 +88,8 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     replay: services.replays.status(s.state.sessionId),
     capture: services.capture.status(s.state.sessionId),
     metrics: sessionMetrics(s.state, s.segments),
+    // From engine memory only: Slack's terms forbid storing message text.
+    slackExcerpts: services.slackExcerpts(s.state.sessionId),
   });
   const origin = opts.webOrigin ?? process.env.WEB_ORIGIN ?? 'http://localhost:3000';
 
@@ -214,6 +217,44 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     if (!repo) throw new HttpError(404, 'Repository not found');
     if (repo.source !== 'github' || !services.github) throw new HttpError(422, 'Only GitHub repositories sync');
     return c.json(await services.github.sync(repo.id));
+  });
+
+  // ---------------- Slack
+
+  app.get('/api/slack/status', async (c) => {
+    if (!services.slack) {
+      return c.json({ configured: false, canConnect: false, connected: false, message: 'Set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET and SLACK_REDIRECT_URL in .env to connect Slack.' });
+    }
+    return c.json(await services.slack.status());
+  });
+
+  /** The Connect button: send the browser to Slack's consent screen. */
+  app.get('/api/slack/connect', (c) => {
+    if (!services.slack) throw new HttpError(503, 'Slack is not configured');
+    return c.redirect(services.slack.beginConnect(), 302);
+  });
+
+  /** Slack sends the browser back here after the user allows (or cancels) access. */
+  app.get('/api/slack/oauth/callback', async (c) => {
+    const back = (q: string) => c.redirect(`${origin}/repos?${q}`, 302);
+    if (!services.slack) return back('slack=error&reason=not_configured');
+    const { code, state, error } = c.req.query();
+    if (error) return back(`slack=error&reason=${encodeURIComponent(error)}`);
+    if (!code || !state) return back('slack=error&reason=missing_code');
+    try {
+      await services.slack.finishConnect(code, state);
+      return back('slack=connected');
+    } catch (err) {
+      const reason = (err as Error).message === 'state_mismatch' ? 'state_mismatch' : 'exchange_failed';
+      console.error(`[api] Slack connect failed: ${(err as Error).message}`);
+      return back(`slack=error&reason=${reason}`);
+    }
+  });
+
+  app.delete('/api/slack', async (c) => {
+    if (!services.slack) throw new HttpError(503, 'Slack is not configured');
+    await services.slack.disconnect();
+    return c.json({ ok: true });
   });
 
   // ---------------- sessions

@@ -51,6 +51,7 @@ export class RecordStore {
           description: d.description,
           acceptanceCriteria: d.acceptanceCriteria,
           codeRefs: d.codeRefs,
+          slackRefs: d.slackRefs,
           evidence: d.evidence,
           confirmedBy: d.confirmedBy,
           confirmation: d.confirmation,

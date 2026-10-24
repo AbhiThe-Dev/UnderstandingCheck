@@ -68,6 +68,20 @@ export async function runCase(
     { sessionId: c.id, featureDescription: c.featureDescription, priorDecisions: c.priorDecisions },
     { analyzer, search: repo?.search ?? null, config: opts.config, usage },
   );
+  if (c.slack) {
+    events.push(
+      ...engine.observeSlack(
+        c.slack.map((m, i) => ({
+          permalink: `https://example.slack.com/archives/C0${i}/p17600000000${i}`,
+          channelName: m.channelName,
+          channelKind: m.channelKind ?? 'public',
+          authorName: m.authorName,
+          ts: `${1_760_000_000 + i * 3600}.000100`,
+          text: m.text,
+        })),
+      ),
+    );
+  }
   for (const seg of parseTranscript(opts.transcript ?? c.transcript)) events.push(...(await engine.ingest(seg)));
   if (opts.finalize) events.push(...(await engine.finalize()));
   return { engine, events, usage };
