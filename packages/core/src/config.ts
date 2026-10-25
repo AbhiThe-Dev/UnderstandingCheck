@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from './ports';
 import type { DiscrepancyCategory } from './types';
 
 export interface ScoringWeights {
@@ -32,6 +33,17 @@ export interface EngineConfig {
     minScore: number;
     maxTestsPerSymbol: number;
   };
+  /** Tiered analyzer: when the small-model screen reads the latest turns. */
+  screening: {
+    /** Meeting time between screens. */
+    intervalMs: number;
+    /** Screen sooner once this many meaningful turns are waiting. */
+    maxTurns: number;
+    /** Earlier turns included as context (never flagged). */
+    overlap: number;
+    /** Flags acted on per screen (each costs one large-model call). */
+    maxFlags: number;
+  };
   /** How many recent segments count as "right after" a proposal, for agreement detection. */
   agreementWindow: number;
   recentWindow: number;
@@ -40,10 +52,14 @@ export interface EngineConfig {
     workspaceLimitUsd: number;
   };
   llm: {
-    maxOutputTokens: Record<'extraction' | 'candidates' | 'clarification' | 'response', number>;
+    /** Reasoning tokens count against these caps, so they leave room beyond the visible answer. */
+    maxOutputTokens: Record<LlmOperation, number>;
     maxInputChars: number;
+    effort: Record<LlmOperation, ReasoningEffort>;
   };
 }
+
+export type LlmOperation = 'extraction' | 'candidates' | 'screen' | 'clarification' | 'response';
 
 export const DEFAULT_CONFIG: EngineConfig = {
   scoring: {
@@ -68,12 +84,15 @@ export const DEFAULT_CONFIG: EngineConfig = {
   },
   rateLimit: { maxLivePerSession: 6, maxOpenLive: 3 },
   retrieval: { maxSymbols: 6, contextBudgetTokens: 2500, slackBudgetTokens: 800, minScore: 1.2, maxTestsPerSymbol: 1 },
+  screening: { intervalMs: 60_000, maxTurns: 8, overlap: 3, maxFlags: 2 },
   agreementWindow: 3,
   recentWindow: 12,
   budget: { workspaceLimitUsd: 5 },
   llm: {
-    maxOutputTokens: { extraction: 400, candidates: 1200, clarification: 500, response: 150 },
+    maxOutputTokens: { extraction: 400, candidates: 2000, screen: 600, clarification: 800, response: 300 },
     maxInputChars: 24_000,
+    // Spotting a conflict in cited code needs little reasoning; screening and classifying need almost none.
+    effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal' },
   },
 };
 
@@ -101,12 +120,14 @@ function deepMerge(base: unknown, over: unknown): unknown {
 export interface ModelPrice {
   inputPerMTok: number;
   outputPerMTok: number;
+  /** Price of input tokens served from the prompt cache; defaults to the full input price. */
+  cachedInputPerMTok?: number;
 }
 
 export const DEFAULT_PRICES: Record<string, ModelPrice> = {
   'heuristic-v1': { inputPerMTok: 0, outputPerMTok: 0 },
-  'gpt-5-mini': { inputPerMTok: 0.25, outputPerMTok: 2.0 },
-  'gpt-5': { inputPerMTok: 1.25, outputPerMTok: 10.0 },
+  'gpt-5-mini': { inputPerMTok: 0.25, outputPerMTok: 2.0, cachedInputPerMTok: 0.025 },
+  'gpt-5': { inputPerMTok: 1.25, outputPerMTok: 10.0, cachedInputPerMTok: 0.125 },
 };
 
 /** Merge `UC_MODEL_PRICES_JSON` (e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}`) over the defaults. */
@@ -145,8 +166,22 @@ export function estimateCostUsd(
   inputTokens: number,
   outputTokens: number,
   prices: Record<string, ModelPrice> = DEFAULT_PRICES,
+  cachedInputTokens = 0,
 ): number {
   const p = prices[model];
   if (!p) return 0;
-  return (inputTokens * p.inputPerMTok + outputTokens * p.outputPerMTok) / 1_000_000;
+  const cached = Math.min(cachedInputTokens, inputTokens);
+  return ((inputTokens - cached) * p.inputPerMTok + cached * (p.cachedInputPerMTok ?? p.inputPerMTok) + outputTokens * p.outputPerMTok) / 1_000_000;
+}
+
+/** Merge `UC_LLM_EFFORT_JSON` (e.g. `{"candidates":"medium"}`) over the default reasoning effort per operation. */
+export function effortFrom(json: string | undefined, base: Record<LlmOperation, ReasoningEffort> = DEFAULT_CONFIG.llm.effort): Record<LlmOperation, ReasoningEffort> {
+  if (!json) return base;
+  const allowed = new Set(['minimal', 'low', 'medium', 'high']);
+  try {
+    const parsed = JSON.parse(json) as Record<string, string>;
+    return { ...base, ...Object.fromEntries(Object.entries(parsed).filter(([k, v]) => k in base && allowed.has(v))) };
+  } catch {
+    return base;
+  }
 }

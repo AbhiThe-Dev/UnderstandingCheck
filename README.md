@@ -31,6 +31,8 @@ In the web app click **Try the demo**, then **Play**. The seeded scenario:
 | `pnpm test:e2e` | Playwright browser test of the demo flow on its own ports (API 4100, web 3100) and an in-memory database, so your data is untouched. Uses installed Chrome (`PW_CHANNEL=chromium` for the bundled one) |
 | `pnpm eval` | Precision/recall/false-positive/evidence-validity over all labeled fixtures |
 | `pnpm eval:live` | Same evaluation with the OpenAI analyzer (needs `OPENAI_API_KEY`) |
+| `pnpm eval:compare` | Cost and catches per analyzer mode (`--modes heuristic,tiered,llm`), on the fixtures, on blind cases (`--blind`, see `packages/fixtures/blind/README.md`) or on one long transcript (`--transcript file --repo approvals`). AI modes spend real money; `--max-usd` caps each run |
+| `node scripts/export-transcript.mjs --session <id>` | Export a recorded session as a timestamped transcript, from a copy of the database |
 | `pnpm trace <fixture-id>` | Turn-by-turn view of what the engine saw and decided |
 | `pnpm lint` / `pnpm typecheck` / `pnpm build` | Quality gates |
 
@@ -135,7 +137,8 @@ Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requ
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ANALYZER` | `heuristic` | `llm` uses OpenAI when `OPENAI_API_KEY` is set (falls back to heuristic otherwise) |
+| `ANALYZER` | `heuristic` | `llm`: the model on every meaningful turn (measured $1.35 per meeting hour). `tiered`: rules on every turn, a small-model screen each minute, the large model only on flagged stretches (about $0.01 per hour, but the screen misses most issues the rules do not catch; not recommended yet). Both need `OPENAI_API_KEY` |
+| `UC_LLM_EFFORT_JSON` | `{"candidates":"low","extraction":"minimal",...}` | Reasoning effort per model call; models that reject a level fall back to their default |
 | `OPENAI_API_KEY` | — | **Not provided.** Required only for the model-backed analyzer |
 | `UC_MODEL_CHEAP` / `UC_MODEL_REASONING` | `gpt-5-mini` / `gpt-5` | Model names per tier — verify they are current for your account |
 | `UC_MODEL_PRICES_JSON` | built-in table | Override per-model prices used for cost estimates, e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}` |

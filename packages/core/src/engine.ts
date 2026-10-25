@@ -529,6 +529,85 @@ export class SessionEngine {
       .map((x) => x.item);
   }
 
+  // ------------------------------------------------------------------ screening (tiered analyzer)
+
+  /**
+   * Run the analyzer's cheap screen over turns since the last screen, if one is due: at least one
+   * meaningful new turn, and either a minute of meeting time or `maxTurns` meaningful turns have
+   * passed (`force` at the end of a meeting). Each flag gets one large-model call, whose candidates
+   * pass through the same validation, de-duplication and scoring as any other. Callers run this
+   * outside `ingest`, so a slow model never delays the next turn.
+   */
+  async screenIfDue(opts: { force?: boolean } = {}): Promise<EngineEvent[]> {
+    const a = this.deps.analyzer;
+    if (!a.screen || !a.deepCandidates || !this.screenDue(opts)) return [];
+    const sc = (this.state.screening ??= { lastSegmentIndex: -1, lastAt: this.segments[0]!.timestamp });
+    const fresh = this.segments.slice(sc.lastSegmentIndex + 1);
+    const now = this.segments.at(-1)!.timestamp;
+    const cfg = this.cfg.screening;
+    const events: EngineEvent[] = [];
+    if (await this.overBudget(events)) return events;
+
+    const firstNewIndex = sc.lastSegmentIndex + 1;
+    const segments = this.segments.slice(Math.max(0, firstNewIndex - cfg.overlap));
+    const joined = analyzeSegmentHeuristic({
+      state: this.state,
+      segment: { ...this.segments.at(-1)!, text: fresh.map((s) => s.text).join(' ') },
+      participant: this.state.participants[0]!,
+      recent: [],
+    });
+    sc.lastSegmentIndex = this.segments.length - 1;
+    sc.lastAt = now;
+    this.state.metrics.screens = (this.state.metrics.screens ?? 0) + 1;
+
+    const flags = (await a.screen({ state: this.state, segments, firstNewIndex, slack: this.slackContext(joined) }))
+      .map((f) => ({ ...f, segs: f.segmentIds.map((id) => this.segMap.get(id)).filter((s): s is Segment => !!s) }))
+      // Only turns the screen was shown, and at least one new one.
+      .filter((f) => f.segs.length > 0 && f.segs.every((s) => s.index >= segments[0]!.index) && f.segs.some((s) => s.index >= firstNewIndex))
+      .slice(0, cfg.maxFlags);
+    this.state.metrics.screenFlags = (this.state.metrics.screenFlags ?? 0) + flags.length;
+    events.push({ type: 'screened', segments: fresh.length, flags: flags.length });
+
+    for (const f of flags) {
+      const last = f.segs.reduce((x, y) => (y.index > x.index ? y : x));
+      const participant = this.state.participants.find((p) => p.id === last.participantId)!;
+      const recent = this.segments.slice(Math.max(0, last.index - this.cfg.recentWindow + 1), last.index + 1);
+      const ctx = { state: this.state, segment: last, participant, recent };
+      const stretch = f.segs.map((s) => s.text).join(' ');
+      const analysis = analyzeSegmentHeuristic({ ...ctx, segment: { ...last, text: stretch } });
+      const evidence = await this.retrieve(analysis, events);
+      const focusEv = this.state.focus ? this.state.evidence.find((e) => e.id === this.state.focus!.evidenceId) : undefined;
+      if (focusEv && !evidence.some((e) => e.id === focusEv.id)) evidence.push(focusEv);
+      const slack = this.slackContext(analysis);
+      const claim = this.state.claims.find((c) => c.segmentId === last.id);
+      if (!claim) continue;
+      this.state.metrics.deepCalls = (this.state.metrics.deepCalls ?? 0) + 1;
+      const raw = await a.deepCandidates({ ctx, analysis, claim, evidence, slack, hint: f.concern });
+      for (const c of raw) await this.acceptCandidate(c, last, events, slack);
+    }
+    await this.settle(this.segments.length - 1, events);
+    return events;
+  }
+
+  /** Whether `screenIfDue` would screen now (cheap; lets callers skip scheduling a no-op). */
+  screenDue(opts: { force?: boolean } = {}): boolean {
+    if (!this.deps.analyzer.screen || this.segments.length === 0) return false;
+    if (this.state.ended && !opts.force) return false;
+    const sc = this.state.screening ?? { lastSegmentIndex: -1, lastAt: this.segments[0]!.timestamp };
+    const fresh = this.segments.slice(sc.lastSegmentIndex + 1);
+    const meaningful = fresh.filter((s) => this.isMeaningful(s)).length;
+    if (meaningful === 0) return false;
+    if (opts.force) return true;
+    return meaningful >= this.cfg.screening.maxTurns || this.segments.at(-1)!.timestamp - sc.lastAt >= this.cfg.screening.intervalMs;
+  }
+
+  /** The same cheap gate `ingest` uses: requirement, proposal, agreement, disagreement, reversal… */
+  private isMeaningful(s: Segment): boolean {
+    const participant = this.state.participants.find((p) => p.id === s.participantId);
+    if (!participant) return false;
+    return analyzeSegmentHeuristic({ state: this.state, segment: s, participant, recent: [] }).meaningful;
+  }
+
   /** Text of the Slack messages this engine holds in memory (for the live panel; never persisted). */
   slackExcerpts(): { id: string; text: string }[] {
     return [...this.slackItems.values()].map((i) => ({ id: i.ref.id, text: i.text.slice(0, 280) }));

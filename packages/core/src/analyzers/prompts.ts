@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { SlackContextItem } from '../ports';
+import type { ScreenInput, SlackContextItem } from '../ports';
 import type { CodeEvidence, Discrepancy, SessionState } from '../types';
 import { truncate } from '../text';
 
@@ -133,8 +133,9 @@ export const CandidateSchema = z.object({
 });
 
 export const ClarificationSchema = z.object({
-  format: z.enum(['verbal', 'scenario', 'before_after', 'decision_table']),
-  question: z.string().max(240),
+  // Models often leave this out; the analyzer infers it from whether a scenario was written.
+  format: z.enum(['verbal', 'scenario', 'before_after', 'decision_table']).optional(),
+  question: z.string().max(500),
   scenario: z.string().max(400).nullable(),
   yesMeans: z.enum(['A', 'B', 'C']).nullable(),
   noMeans: z.enum(['A', 'B', 'C']).nullable(),
@@ -147,11 +148,43 @@ export const ResponseSchema = z.object({
   reason: z.string().max(200),
 });
 
+export const ScreenSchema = z.object({
+  flags: z
+    .array(
+      z.object({
+        segmentIds: z.array(z.string()).min(1).max(4),
+        concern: z.string().max(200),
+        category: z.enum(['direct_disagreement', 'hidden_assumption', 'codebase_conflict', 'missing_specification', 'false_alignment']),
+      }),
+    )
+    .max(2),
+});
+
+/** Compact view of a stretch of turns for the screen: new turns marked, older ones context only. */
+export function renderScreen(input: ScreenInput): string {
+  const { state, segments, firstNewIndex, slack } = input;
+  const p = (id: string) => state.participants.find((x) => x.id === id);
+  const turns = segments.map((s) => `${s.index >= firstNewIndex ? '' : '(context) '}[${s.id}] ${p(s.participantId)?.displayName ?? s.participantId}: ${truncate(s.text, 300)}`);
+  const focus = state.focus;
+  const behavior = focus ? state.existingBehavior.filter((b) => b.evidenceId === focus.evidenceId).map((b) => `- ${b.description}`) : [];
+  const open = state.discrepancies.filter((d) => d.status !== 'dismissed').map((d) => `- ${d.title}`);
+  return [
+    `Feature: ${fence('untrusted_feature_description', state.feature.description || '(not stated yet)')}`,
+    focus ? `Code in focus: ${focus.symbolName}\n${behavior.join('\n') || '- (no notable effects)'}` : 'Code in focus: none',
+    `Already raised (do not flag again):\n${open.join('\n') || '- none'}`,
+    slack.length ? `Earlier Slack decisions:\n${renderSlack(slack, 1200)}` : '',
+    fence('untrusted_transcript', turns.join('\n')),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 export const PROMPTS = {
+  screen: `You screen a short stretch of a software team's meeting. Flag a stretch only when people may leave with different expectations that would lead to different implementations: conflicting requirements, agreement to a plan that leaves a consequential behavior open, reliance on code side effects nobody mentioned, or a conflict with an earlier Slack decision. Only flag new turns (not those marked "(context)") and never something already raised. Most stretches contain nothing worth flagging: return an empty list unless you are fairly sure. concern: one sentence naming the ambiguity.`,
   extraction: `Classify the newest transcript segment. kinds: what the speaker is doing (requirement, proposal of an implementation, agreement, disagreement, question, correction, statement). polarity: whether they want the behavior they mention (positive) or reject it (negative). reuseTarget: the existing code/system they say they will reuse, or null. reversal: true if they talk about undoing/reverting/cancelling an existing operation.`,
   candidates: `Identify at most two consequential potential discrepancies raised by the NEWEST segment, using the conversation and the retrieved code.
 Categories: direct_disagreement (explicitly conflicting requirements), hidden_assumption (relying on existing code whose side effects were not discussed), codebase_conflict (a proposal that may conflict with existing behavior — a potential conflict, not a guaranteed defect), missing_specification (the single most consequential unspecified behavior, not a list of edge cases), false_alignment (one participant agreed to a proposal but a consequential ambiguity means they may expect different behavior; this is only suspected — never claim they disagree).
 For every candidate give two or three interpretations that would lead to different implementations, cite code by evidence id and line, cite Slack messages by id in slackRefs (empty when none apply), and quote supporting statements verbatim with their segment ids. A statement that contradicts a decision in a Slack message is a direct_disagreement with that message's participant id. statedPositions lists only positions a participant explicitly stated (explicit=true) or that their proposal implies (explicit=false). Prioritize permissions/access, data integrity, money, irreversible actions, business rules and external side effects. If nothing is consequential, return an empty list.`,
-  clarification: `Write one clarification for this concern. For purpose=private_check write a short realistic scenario and a yes/no question asked privately of one participant, without revealing a preferred answer, understandable by a non-technical stakeholder, whose yes and no answers map to different interpretations. For purpose=group_question write a neutral question the team can discuss. For purpose=surface_difference neutrally state that participants expect different outcomes and ask which behavior is intended. Use a decision table only for permission or business-rule matrices.`,
+  clarification: `Write one clarification for this concern. Keep the question under 200 characters and set format. For purpose=private_check write a short realistic scenario and a yes/no question asked privately of one participant, without revealing a preferred answer, understandable by a non-technical stakeholder, whose yes and no answers map to different interpretations. For purpose=group_question write a neutral question the team can discuss. For purpose=surface_difference neutrally state that participants expect different outcomes and ask which behavior is intended. Use a decision table only for permission or business-rule matrices.`,
   response: `Decide which interpretation (A, B, C) the participant's reply supports. Return null if the reply is ambiguous or does not answer. Do not guess.`,
 };

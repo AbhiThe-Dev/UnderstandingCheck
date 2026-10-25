@@ -7,6 +7,8 @@ export interface OpenAiProviderOptions {
   models?: Partial<Record<ModelTier, string>>;
   baseURL?: string;
   timeoutMs?: number;
+  /** Replaces the OpenAI client (tests). */
+  client?: { chat: { completions: { create: OpenAI['chat']['completions']['create'] } } };
 }
 
 /**
@@ -15,28 +17,43 @@ export interface OpenAiProviderOptions {
  */
 export class OpenAiProvider implements LlmProvider {
   readonly name = 'openai';
-  private client: OpenAI;
+  private client: NonNullable<OpenAiProviderOptions['client']>;
   private models: Record<ModelTier, string>;
+  /** Models that rejected `reasoning_effort` (non-reasoning models, or an effort level they lack). */
+  private noEffort = new Set<string>();
 
   constructor(opts: OpenAiProviderOptions) {
-    this.client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL, timeout: opts.timeoutMs ?? 30_000, maxRetries: 1 });
+    this.client = opts.client ?? new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL, timeout: opts.timeoutMs ?? 30_000, maxRetries: 1 });
     this.models = { cheap: opts.models?.cheap ?? 'gpt-5-mini', reasoning: opts.models?.reasoning ?? 'gpt-5' };
   }
 
   async complete<T>(req: LlmRequest<T>): Promise<LlmResult<T>> {
     const model = this.models[req.tier];
-    const res = await this.client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: req.system },
-        { role: 'user', content: req.user },
-      ],
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: req.schemaName, schema: z.toJSONSchema(req.schema) as Record<string, unknown>, strict: false },
-      },
-      max_completion_tokens: req.maxOutputTokens,
-    });
+    const create = (withEffort: boolean) =>
+      this.client.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: req.system },
+          { role: 'user', content: req.user },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: req.schemaName, schema: z.toJSONSchema(req.schema) as Record<string, unknown>, strict: false },
+        },
+        max_completion_tokens: req.maxOutputTokens,
+        ...(withEffort && req.effort ? { reasoning_effort: req.effort } : {}),
+        ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
+        stream: false,
+      });
+    let res;
+    try {
+      res = await create(!this.noEffort.has(model));
+    } catch (err) {
+      // Not every model accepts every effort level; fall back to the model's default once and remember.
+      if (!req.effort || this.noEffort.has(model) || !/reasoning_effort|reasoning effort/i.test((err as Error).message)) throw err;
+      this.noEffort.add(model);
+      res = await create(false);
+    }
     const content = res.choices[0]?.message?.content ?? '';
     let json: unknown;
     try {
@@ -48,7 +65,12 @@ export class OpenAiProvider implements LlmProvider {
     if (!parsed.success) throw new Error(`Model output failed validation for ${req.operation}: ${parsed.error.message.slice(0, 300)}`);
     return {
       data: parsed.data,
-      usage: { model, inputTokens: res.usage?.prompt_tokens ?? 0, outputTokens: res.usage?.completion_tokens ?? 0 },
+      usage: {
+        model,
+        inputTokens: res.usage?.prompt_tokens ?? 0,
+        outputTokens: res.usage?.completion_tokens ?? 0,
+        cachedInputTokens: res.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
     };
   }
 }

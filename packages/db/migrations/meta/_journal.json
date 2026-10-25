@@ -29,6 +29,13 @@
       "when": 1792879617476,
       "tag": "0003_slack",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792942753251,
+      "tag": "0004_usage_cached_tokens",
+      "breakpoints": true
     }
   ]
 }

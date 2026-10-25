@@ -2,6 +2,8 @@ import {
   HeuristicAnalyzer,
   LlmAnalyzer,
   SessionEngine,
+  TieredAnalyzer,
+  effortFrom,
   parseTranscript,
   DEFAULT_CONFIG,
   type Analyzer,
@@ -43,10 +45,13 @@ export class MemoryUsage implements UsageSink {
 
 /** `ANALYZER=llm` with OPENAI_API_KEY uses the model; anything else uses the credential-free heuristic analyzer. */
 export function analyzerFromEnv(sessionId: string, usage: UsageSink, config: EngineConfig = DEFAULT_CONFIG): Analyzer {
-  if (process.env.ANALYZER === 'llm') {
+  const mode = process.env.ANALYZER;
+  if (mode === 'llm' || mode === 'tiered') {
     const provider = createLlmProviderFromEnv();
-    if (!provider) throw new Error('ANALYZER=llm requires OPENAI_API_KEY');
-    return new LlmAnalyzer({ provider, sessionId, usage, limits: config.llm });
+    if (!provider) throw new Error(`ANALYZER=${mode} requires OPENAI_API_KEY`);
+    const llm = new LlmAnalyzer({ provider, sessionId, usage, limits: { ...config.llm, effort: effortFrom(process.env.UC_LLM_EFFORT_JSON, config.llm.effort) } });
+    // UC_TIERED_RULES=off: rules still pace the screen, but only the AI layers can raise anything.
+    return mode === 'tiered' ? new TieredAnalyzer(llm, { ruleCandidates: process.env.UC_TIERED_RULES !== 'off' }) : llm;
   }
   return new HeuristicAnalyzer();
 }
@@ -82,7 +87,12 @@ export async function runCase(
       ),
     );
   }
-  for (const seg of parseTranscript(opts.transcript ?? c.transcript)) events.push(...(await engine.ingest(seg)));
+  // Screens run between turns, as the API schedules them (no-ops for analyzers without a screen).
+  for (const seg of parseTranscript(opts.transcript ?? c.transcript)) {
+    events.push(...(await engine.ingest(seg)));
+    events.push(...(await engine.screenIfDue()));
+  }
+  events.push(...(await engine.screenIfDue({ force: true })));
   if (opts.finalize) events.push(...(await engine.finalize()));
   return { engine, events, usage };
 }

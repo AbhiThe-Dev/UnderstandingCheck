@@ -16,4 +16,5 @@ export * from './metrics';
 export * from './records';
 export { HeuristicAnalyzer, interpretResponseHeuristic } from './analyzers/heuristic';
 export { LlmAnalyzer, type LlmAnalyzerOptions } from './analyzers/llm';
+export { TieredAnalyzer } from './analyzers/tiered';
 export { redactSecrets, SYSTEM_BASE } from './analyzers/prompts';

@@ -29,7 +29,7 @@ interface Usage {
     costPerUsefulSuggestion: number | null;
     costPerConfirmedMisunderstanding: number | null;
   }[];
-  byOperation: { operation: string; model: string; calls: number; inputTokens: number; outputTokens: number; costUsd: number }[];
+  byOperation: { operation: string; model: string; calls: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; costUsd: number }[];
 }
 
 export default function CostPage() {
@@ -83,8 +83,8 @@ export default function CostPage() {
             <Empty>No model calls recorded.</Empty>
           ) : (
             <Table
-              head={['Operation', 'Model', 'Calls', 'Input tok', 'Output tok', 'Est. cost']}
-              rows={data.byOperation.map((o) => [o.operation, o.model, o.calls, tokens(o.inputTokens), tokens(o.outputTokens), usd(o.costUsd)])}
+              head={['Operation', 'Model', 'Calls', 'Input tok', 'Cached', 'Output tok', 'Est. cost']}
+              rows={data.byOperation.map((o) => [o.operation, o.model, o.calls, tokens(o.inputTokens), tokens(o.cachedInputTokens), tokens(o.outputTokens), usd(o.costUsd)])}
             />
           )}
         </Card>

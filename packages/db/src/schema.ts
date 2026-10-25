@@ -249,6 +249,8 @@ export const aiUsage = pgTable(
     operation: text('operation').notNull(),
     inputTokens: integer('input_tokens').notNull(),
     outputTokens: integer('output_tokens').notNull(),
+    /** Input tokens served from the provider's prompt cache (included in input_tokens). */
+    cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
     estimatedCost: real('estimated_cost').notNull(),
     createdAt: createdAt(),
   },

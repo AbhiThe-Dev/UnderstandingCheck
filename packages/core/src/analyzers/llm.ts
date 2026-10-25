@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, estimateCostUsd, type EngineConfig, type ModelPrice } from '../config';
+import { DEFAULT_CONFIG, estimateCostUsd, type EngineConfig, type LlmOperation, type ModelPrice } from '../config';
 import type {
   AnalysisContext,
   Analyzer,
@@ -9,6 +9,8 @@ import type {
   LlmRequest,
   RawCandidate,
   ResponseInterpretation,
+  ScreenFlag,
+  ScreenInput,
   SegmentAnalysis,
   UsageSink,
 } from '../ports';
@@ -25,8 +27,10 @@ import {
   SYSTEM_BASE,
   renderDiscrepancy,
   renderEvidence,
+  renderScreen,
   renderSlack,
   renderState,
+  ScreenSchema,
 } from './prompts';
 
 export interface LlmAnalyzerOptions {
@@ -49,14 +53,18 @@ export class LlmAnalyzer implements Analyzer {
 
   private async call<T>(req: LlmRequest<T>): Promise<T> {
     const user = req.user.length > this.opts.limits.maxInputChars ? req.user.slice(-this.opts.limits.maxInputChars) : req.user;
-    const res = await this.opts.provider.complete({ ...req, user });
+    const effort = req.effort ?? this.opts.limits.effort?.[req.operation as LlmOperation];
+    // One cache key per session: its calls share a system prompt and, often, the same code evidence.
+    const res = await this.opts.provider.complete({ ...req, user, effort, cacheKey: req.cacheKey ?? this.opts.sessionId });
+    const cached = res.usage.cachedInputTokens ?? 0;
     await this.opts.usage?.record({
       sessionId: this.opts.sessionId,
       model: res.usage.model,
       operation: req.operation,
       inputTokens: res.usage.inputTokens,
       outputTokens: res.usage.outputTokens,
-      estimatedCostUsd: estimateCostUsd(res.usage.model, res.usage.inputTokens, res.usage.outputTokens, this.opts.prices),
+      cachedInputTokens: cached,
+      estimatedCostUsd: estimateCostUsd(res.usage.model, res.usage.inputTokens, res.usage.outputTokens, this.opts.prices, cached),
     });
     return res.data;
   }
@@ -87,10 +95,28 @@ export class LlmAnalyzer implements Analyzer {
     }
   }
 
-  async generateCandidates({ ctx, analysis, evidence, slack = [] }: CandidateInput): Promise<RawCandidate[]> {
+  /** The tiered analyzer's cheap screen over a batch of turns (small model, minimal reasoning). */
+  async screenTurns(input: ScreenInput): Promise<ScreenFlag[]> {
+    try {
+      const out = await this.call({
+        operation: 'screen',
+        tier: 'cheap',
+        system: `${SYSTEM_BASE}\n\n${PROMPTS.screen}`,
+        user: renderScreen(input),
+        schema: ScreenSchema,
+        schemaName: 'screen',
+        maxOutputTokens: this.opts.limits.maxOutputTokens.screen,
+      });
+      return out.flags;
+    } catch {
+      return []; // a failed screen is a missed chance, never a reason to break the meeting
+    }
+  }
+
+  async generateCandidates({ ctx, analysis, evidence, slack = [], hint }: CandidateInput): Promise<RawCandidate[]> {
     // Slack only arrives when it shares terms with this segment (the engine filters it), so it can justify a call.
     const interesting =
-      evidence.length > 0 || slack.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
+      !!hint || evidence.length > 0 || slack.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
     if (!interesting) return [];
     let out;
     try {
@@ -98,9 +124,10 @@ export class LlmAnalyzer implements Analyzer {
         operation: 'candidates',
         tier: 'reasoning',
         system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`,
-        user: `${renderState(ctx.state)}\n\nNewest segment id: ${ctx.segment.id}\n\nRetrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
+        // Least-changing first (code, then Slack, then the conversation) so consecutive calls share a cacheable prefix.
+        user: `Retrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
           slack.length > 0 ? `\n\nSlack messages (earlier discussion):\n${renderSlack(slack, DEFAULT_CONFIG.retrieval.slackBudgetTokens * 4)}` : ''
-        }`,
+        }\n\n${renderState(ctx.state)}\n\nNewest segment id: ${ctx.segment.id}${hint ? `\nA screening pass flagged this stretch: ${hint}` : ''}`,
         schema: CandidateSchema,
         schemaName: 'discrepancy_candidates',
         maxOutputTokens: this.opts.limits.maxOutputTokens.candidates,
@@ -155,7 +182,7 @@ export class LlmAnalyzer implements Analyzer {
         maxOutputTokens: this.opts.limits.maxOutputTokens.clarification,
       });
       return {
-        format: out.format,
+        format: out.format ?? (out.scenario ? 'scenario' : 'verbal'),
         question: out.question,
         scenario: out.scenario,
         beforeAfter: null,

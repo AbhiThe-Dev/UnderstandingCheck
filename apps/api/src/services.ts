@@ -3,9 +3,12 @@ import {
   HeuristicAnalyzer,
   LlmAnalyzer,
   SessionEngine,
+  TieredAnalyzer,
+  effortFrom,
   pricesFrom,
   type Analyzer,
   type EngineEvent,
+  type LlmProvider,
   type PriorDecision,
   type SessionState,
 } from '@uc/core';
@@ -31,12 +34,15 @@ import { SecretBox } from './secrets';
 import { SlackLink } from './slack';
 import { SlackContext, type SlackContextOptions } from './slackContext';
 
-export type AnalyzerMode = 'heuristic' | 'llm';
+/** heuristic: rules only (free). llm: the model on every meaningful turn. tiered: rules, a cheap screen each minute, the large model on flags. */
+export type AnalyzerMode = 'heuristic' | 'llm' | 'tiered';
 
 export interface ServicesOptions {
   /** PGlite data directory; omit for in-memory (tests). */
   dataDir?: string;
   analyzer?: AnalyzerMode;
+  /** Model provider for llm/tiered; defaults to OpenAI from OPENAI_API_KEY (tests pass a scripted one). */
+  llm?: LlmProvider | null;
   /** Repository host; defaults to the GitHub App from the environment (null = not configured). */
   host?: RepoHost | null;
   /** Recall.ai client for meeting capture; defaults to RECALL_API_KEY/RECALL_REGION. */
@@ -82,6 +88,7 @@ export class Services {
     capture: { recall: RecallClient | null; transcriber: (() => LiveTranscriber) | null },
     slack: SlackLink | null,
     slackOpts: Partial<SlackContextOptions> = {},
+    private llm: LlmProvider | null = null,
   ) {
     this.slack = slack;
     this.slackContext = slack
@@ -101,9 +108,11 @@ export class Services {
   static async create(opts: ServicesOptions = {}): Promise<Services> {
     const { db } = await openDatabase(opts.dataDir);
     const ws = await ensureDemoWorkspace(db);
-    const requested = opts.analyzer ?? (process.env.ANALYZER === 'llm' ? 'llm' : 'heuristic');
-    const mode: AnalyzerMode = requested === 'llm' && createLlmProviderFromEnv() ? 'llm' : 'heuristic';
-    if (requested === 'llm' && mode !== 'llm') console.warn('ANALYZER=llm but OPENAI_API_KEY is not set; using the heuristic analyzer.');
+    const env = process.env.ANALYZER;
+    const requested: AnalyzerMode = opts.analyzer ?? (env === 'llm' || env === 'tiered' ? env : 'heuristic');
+    const llm = opts.llm !== undefined ? opts.llm : createLlmProviderFromEnv();
+    const mode: AnalyzerMode = requested !== 'heuristic' && llm ? requested : 'heuristic';
+    if (requested !== mode) console.warn(`ANALYZER=${requested} but OPENAI_API_KEY is not set; using the heuristic analyzer.`);
     let host = opts.host;
     if (host === undefined) {
       try {
@@ -121,7 +130,7 @@ export class Services {
     const envToken = opts.slackUserToken ?? process.env.SLACK_USER_TOKEN;
     const canConnect = opts.slack !== undefined ? !!opts.slack : !!(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
     const slack = slackClient ? new SlackLink(store, slackClient, opts.secrets ?? SecretBox.fromEnv(opts.dataDir), { canConnect, envToken }) : null;
-    return new Services(store, mode, host, { recall, transcriber }, slack, opts.slackContext);
+    return new Services(store, mode, host, { recall, transcriber }, slack, opts.slackContext, llm);
   }
 
   // ---------------- GitHub
@@ -206,11 +215,9 @@ export class Services {
   // ---------------- sessions
 
   private analyzerFor(sessionId: string): Analyzer {
-    if (this.analyzerMode === 'llm') {
-      const provider = createLlmProviderFromEnv();
-      if (provider) {
-        return new LlmAnalyzer({ provider, sessionId, usage: this.store.usageSink(sessionId), limits: DEFAULT_CONFIG.llm, prices: pricesFrom(process.env.UC_MODEL_PRICES_JSON) });
-      }
+    if (this.analyzerMode !== 'heuristic' && this.llm) {
+      const llm = new LlmAnalyzer({ provider: this.llm, sessionId, usage: this.store.usageSink(sessionId), limits: llmLimits(), prices: pricesFrom(process.env.UC_MODEL_PRICES_JSON) });
+      return this.analyzerMode === 'tiered' ? new TieredAnalyzer(llm) : llm;
     }
     return new HeuristicAnalyzer();
   }
@@ -304,10 +311,33 @@ export class Services {
       const snapshot: SessionSnapshot = { state: engine.state, segments: engine.segments, status: opts.ended ? 'ended' : row.status };
       for (const l of this.listeners.get(id) ?? []) l(snapshot, events);
       if (!opts.ended) this.slackContext?.onRun(row, events, engine.state);
+      if (!opts.ended && events.some((e) => e.type === 'segment_added') && engine.screenDue()) this.scheduleScreen(id);
       return { events, snapshot };
     });
     this.queues.set(id, next);
     return next;
+  }
+
+  private screening = new Set<string>();
+
+  /**
+   * Tiered analyzer: queue the cheap screen behind the current operation instead of running it
+   * inside ingestion, so turns keep flowing while the model thinks. At most one queued per session.
+   */
+  private scheduleScreen(id: string) {
+    if (this.screening.has(id)) return;
+    this.screening.add(id);
+    void this.run(id, (engine) => engine.screenIfDue())
+      .catch((err) => {
+        if (!(err instanceof HttpError)) console.error(`[api] screen failed for ${id}: ${(err as Error).message}`);
+      })
+      .finally(() => this.screening.delete(id));
+  }
+
+  /** End a meeting: screen whatever the last timer did not cover, then finalize. */
+  async endSession(id: string) {
+    if (this.analyzerMode === 'tiered') await this.run(id, (engine) => engine.screenIfDue({ force: true }));
+    return this.run(id, (engine) => engine.finalize(), { ended: true });
   }
 
   /** Text of Slack messages the session's engine holds in memory, for the live panel. Never read from the database. */
@@ -348,6 +378,11 @@ export class Services {
   forget(id: string) {
     this.engines.delete(id);
   }
+}
+
+/** Model limits, with per-operation reasoning effort overridable through UC_LLM_EFFORT_JSON. */
+function llmLimits() {
+  return { ...DEFAULT_CONFIG.llm, effort: effortFrom(process.env.UC_LLM_EFFORT_JSON) };
 }
 
 export class HttpError extends Error {

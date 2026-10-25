@@ -40,6 +40,8 @@ export interface SymbolSearch {
 // ---------- LLM provider (implemented by @uc/providers) ----------
 
 export type ModelTier = 'cheap' | 'reasoning';
+/** How much hidden reasoning a reasoning model may spend (billed as output tokens). */
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
 export interface LlmRequest<T> {
   operation: string;
@@ -49,12 +51,17 @@ export interface LlmRequest<T> {
   schema: z.ZodType<T>;
   schemaName: string;
   maxOutputTokens: number;
+  effort?: ReasoningEffort;
+  /** Groups requests that share a prompt prefix so the provider can reuse its cache (e.g. the session id). */
+  cacheKey?: string;
 }
 
 export interface LlmUsage {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Part of `inputTokens` served from the provider's prompt cache (billed at a discount). */
+  cachedInputTokens?: number;
 }
 
 export interface LlmResult<T> {
@@ -75,6 +82,7 @@ export interface UsageRecord {
   operation: string;
   inputTokens: number;
   outputTokens: number;
+  cachedInputTokens?: number;
   estimatedCostUsd: number;
 }
 
@@ -132,6 +140,25 @@ export interface CandidateInput {
   evidence: CodeEvidence[];
   /** Slack messages relevant to this segment. Their text is for analysis only and must not be copied into output. */
   slack?: SlackContextItem[];
+  /** Why a screening pass flagged this stretch (tiered analyzer); the call is made even if nothing else looks interesting. */
+  hint?: string;
+}
+
+/** A stretch of conversation for the tiered analyzer's cheap screen. */
+export interface ScreenInput {
+  state: SessionState;
+  /** Turns to read, oldest first: the new ones plus a little earlier context. */
+  segments: Segment[];
+  /** Index of the first new turn; earlier ones are context and may not be flagged. */
+  firstNewIndex: number;
+  slack: SlackContextItem[];
+}
+
+/** A stretch the screen thinks deserves the large model's attention. */
+export interface ScreenFlag {
+  segmentIds: string[];
+  concern: string;
+  category: DiscrepancyCategory;
 }
 
 /**
@@ -178,4 +205,11 @@ export interface Analyzer {
     d: Discrepancy,
     opts: { clarification?: Clarification; latestOtherPosition?: Position },
   ): Promise<ResponseInterpretation>;
+  /**
+   * Tiered analyzers only: read a batch of recent turns cheaply and flag stretches worth a closer
+   * look. The engine calls it on a timer (meeting time) instead of per turn.
+   */
+  screen?(input: ScreenInput): Promise<ScreenFlag[]>;
+  /** Tiered analyzers only: full candidate generation for a flagged stretch. */
+  deepCandidates?(input: CandidateInput): Promise<RawCandidate[]>;
 }

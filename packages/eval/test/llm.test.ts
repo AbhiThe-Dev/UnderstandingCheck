@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, LlmAnalyzer, SessionEngine, parseTranscript } from '@uc/core';
+import { DEFAULT_CONFIG, HeuristicAnalyzer, LlmAnalyzer, SessionEngine, parseTranscript } from '@uc/core';
 import { ScriptedLlmProvider } from '@uc/providers';
 import { describe, expect, it } from 'vitest';
 import { MemoryUsage, loadSampleRepo } from '../src/runner';
@@ -101,5 +101,21 @@ describe('LLM analyzer behind the same validation gate', () => {
     expect(events.some((e) => e.type === 'budget_exhausted')).toBe(true);
     expect(engine.state.budgetExhausted).toBe(true);
     expect(provider.calls.filter((c) => c.operation === 'candidates')).toHaveLength(0);
+  });
+});
+
+describe('clarification drafting with real-model output shapes', () => {
+  it('accepts a reply that omits format (as gpt-5-mini did live) and infers it from the scenario', async () => {
+    const provider = new ScriptedLlmProvider({
+      clarification: { question: 'When a reviewer clicks Undo, should the member also lose portal access, or only the approval status change?'.repeat(2), scenario: 'Alice was approved at 10:00 and undone at 10:05.', yesMeans: 'B', noMeans: 'A', decisionTable: null },
+    });
+    const analyzer = new LlmAnalyzer({ provider, sessionId: 't', limits: DEFAULT_CONFIG.llm });
+    const repo = await loadSampleRepo('approvals');
+    const { engine } = await SessionEngine.create({ sessionId: 't' }, { analyzer: new HeuristicAnalyzer(), search: repo.search });
+    for (const s of parseTranscript(TRANSCRIPT)) await engine.ingest(s);
+    const d = engine.state.discrepancies[0]!;
+    const draft = await analyzer.draftClarification(d, 'private_check', engine.state, null);
+    expect(draft.format).toBe('scenario');
+    expect(draft.question).toMatch(/^When a reviewer clicks Undo/);
   });
 });

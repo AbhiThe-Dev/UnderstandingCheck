@@ -361,6 +361,10 @@ export const EngineMetrics = z.object({
   duplicateSegments: z.number().int().optional(),
   /** Processing time of the most recent ingests (ms), newest last; bounded. */
   latencyMs: z.array(z.number()).optional(),
+  /** Tiered analyzer: small-model screens run, stretches they flagged, and large-model calls those caused. */
+  screens: z.number().int().optional(),
+  screenFlags: z.number().int().optional(),
+  deepCalls: z.number().int().optional(),
 });
 export type EngineMetrics = z.infer<typeof EngineMetrics>;
 
@@ -408,6 +412,13 @@ export const SessionState = z.object({
     })
     .nullable()
     .optional(),
+  /** Where the tiered analyzer's screen last read up to (segment index and meeting time). */
+  screening: z
+    .object({
+      lastSegmentIndex: z.number().int(),
+      lastAt: z.number().int(),
+    })
+    .optional(),
   /** Slack messages seen this session, by reference (never their text). */
   slackRefs: z.array(SlackRef).optional(),
   /** The latest Slack search results that still count as context; `at` is meeting time. */
@@ -437,4 +448,5 @@ export type EngineEvent =
   | { type: 'requirement_recorded'; requirement: Requirement }
   | { type: 'budget_exhausted'; spentUsd: number; limitUsd: number }
   | { type: 'screen_observed'; evidenceIds: string[]; files: string[] }
-  | { type: 'slack_observed'; refIds: string[] };
+  | { type: 'slack_observed'; refIds: string[] }
+  | { type: 'screened'; segments: number; flags: number };

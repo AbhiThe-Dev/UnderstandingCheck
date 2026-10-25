@@ -386,6 +386,7 @@ export class WorkspaceStore {
       operation: u.operation,
       inputTokens: u.inputTokens,
       outputTokens: u.outputTokens,
+      cachedInputTokens: u.cachedInputTokens ?? 0,
       estimatedCost: u.estimatedCostUsd,
     });
   }

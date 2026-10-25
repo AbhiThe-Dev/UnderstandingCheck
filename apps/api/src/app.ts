@@ -470,7 +470,7 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
     services.replays.stop(c.req.param('id'));
     services.capture.stop(c.req.param('id'));
     const id = c.req.param('id');
-    const { snapshot } = await services.run(id, (engine) => engine.finalize(), { ended: true });
+    const { snapshot } = await services.endSession(id);
     // Confirmed decisions become durable requirement records (once per session).
     const published = await services.store.records.publishSession(id, recordDrafts(snapshot.state));
     return c.json({ ...view(snapshot), published });
@@ -582,11 +582,12 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
       }),
     );
     const byOperation = Object.values(
-      rows.reduce<Record<string, { operation: string; model: string; calls: number; inputTokens: number; outputTokens: number; costUsd: number }>>((acc, u) => {
+      rows.reduce<Record<string, { operation: string; model: string; calls: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; costUsd: number }>>((acc, u) => {
         const k = `${u.operation}:${u.model}`;
-        acc[k] ??= { operation: u.operation, model: u.model, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+        acc[k] ??= { operation: u.operation, model: u.model, calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 };
         acc[k].calls++;
         acc[k].inputTokens += u.inputTokens;
+        acc[k].cachedInputTokens += u.cachedInputTokens;
         acc[k].outputTokens += u.outputTokens;
         acc[k].costUsd += u.estimatedCost;
         return acc;
