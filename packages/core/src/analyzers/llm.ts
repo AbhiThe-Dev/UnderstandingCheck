@@ -10,6 +10,8 @@ import type {
   LlmRequest,
   LlmUsage,
   ModelTier,
+  PreviewInput,
+  PreviewResult,
   RawCandidate,
   ResponseInterpretation,
   ScreenFlag,
@@ -19,7 +21,8 @@ import type {
 } from '../ports';
 import type { Clarification, Discrepancy, Position, SessionState } from '../types';
 import { renderFactSheet, type FactSheet } from '../facts';
-import { LlmOutputError } from '../ports';
+import { LlmOutputError, PreviewError } from '../ports';
+import { EMPTY_PREVIEW_USAGE } from '../preview';
 import { contentTerms } from '../text';
 import { analyzeSegmentHeuristic } from '../understanding';
 import { HeuristicAnalyzer, interpretResponseHeuristic } from './heuristic';
@@ -32,7 +35,9 @@ import {
   SYSTEM_BASE,
   renderDiscrepancy,
   FactCandidateSchema,
+  PreviewSchema,
   renderEvidence,
+  renderPreviewInput,
   renderScreen,
   renderSlack,
   renderState,
@@ -50,12 +55,19 @@ export interface LlmAnalyzerOptions {
   /** Model tier for candidate generation (default: reasoning). */
   candidatesTier?: ModelTier;
   /**
+   * Model tier for implementation previews (default: cheap). Measured on the downgrade demo: the small
+   * model took ~25 s and ~$0.006 with the same findings as the large one at ~42 s and ~$0.03.
+   */
+  previewTier?: ModelTier;
+  /**
    * Also keep the rule-based findings for each turn (free, instant). The model sees them as already
    * flagged and reuses their key, so the two never raise the same concern twice. Off by default here;
    * the app and eval runner turn it on.
    */
   withRules?: boolean;
 }
+
+const PREVIEW_TIMEOUT_MS = 90_000;
 
 /**
  * Model-backed analyzer. Cheap heuristics still gate every call, so the model only sees
@@ -68,11 +80,13 @@ export class LlmAnalyzer implements Analyzer {
     this.name = `llm:${opts.provider.name}`;
   }
 
-  private async call<T>(req: LlmRequest<T>): Promise<T> {
+  /** `onUsage` also receives each call's usage and estimated cost (for per-preview accounting). */
+  private async call<T>(req: LlmRequest<T>, onUsage?: (u: LlmUsage, costUsd: number) => void): Promise<T> {
     const user = req.user.length > this.opts.limits.maxInputChars ? req.user.slice(-this.opts.limits.maxInputChars) : req.user;
     const effort = req.effort ?? this.opts.limits.effort?.[req.operation as LlmOperation];
     const record = (u: LlmUsage, failure: string | null) => {
       const cached = u.cachedInputTokens ?? 0;
+      onUsage?.(u, estimateCostUsd(u.model, u.inputTokens, u.outputTokens, this.opts.prices, cached));
       return this.opts.usage?.record({
         sessionId: this.opts.sessionId,
         model: u.model,
@@ -215,6 +229,41 @@ export class LlmAnalyzer implements Analyzer {
         ),
       meta: { kind: 'llm', linkTerms: contentTerms(`${c.title} ${c.interpretations.map((i) => i.label).join(' ')}`).join(' ') },
     }))];
+  }
+
+  /**
+   * One structured call per request (never per turn): code first, then decisions and the discussion.
+   * The engine validates every reference before anything is shown.
+   */
+  async previewImplementation(input: PreviewInput): Promise<PreviewResult> {
+    const usage = { ...EMPTY_PREVIEW_USAGE };
+    const track = (u: LlmUsage, costUsd: number) => {
+      usage.calls++;
+      usage.inputTokens += u.inputTokens;
+      usage.cachedInputTokens += u.cachedInputTokens ?? 0;
+      usage.outputTokens += u.outputTokens;
+      usage.costUsd += costUsd;
+      usage.model = u.model;
+    };
+    try {
+      const raw = await this.call(
+        {
+          operation: 'preview',
+          tier: this.opts.previewTier ?? 'cheap',
+          // A preview writes a few thousand tokens; past the provider's default timeout, but never retried.
+          timeoutMs: PREVIEW_TIMEOUT_MS,
+          system: `${SYSTEM_BASE}\n\n${PROMPTS.preview}`,
+          user: renderPreviewInput(input, this.opts.limits.maxInputChars),
+          schema: PreviewSchema,
+          schemaName: 'implementation_preview',
+          maxOutputTokens: this.opts.limits.maxOutputTokens.preview ?? DEFAULT_CONFIG.llm.maxOutputTokens.preview,
+        },
+        track,
+      );
+      return { raw, usage };
+    } catch (err) {
+      throw new PreviewError(err instanceof LlmOutputError ? 'The model answered, but the answer was unusable.' : 'The model could not be reached.', usage);
+    }
   }
 
   async draftClarification(

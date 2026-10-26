@@ -1,11 +1,12 @@
 import { mergeConfig, type DeepPartial, type EngineConfig } from './config';
 import { CONSEQUENCE_WEIGHT, describeEffect } from './lexicon';
-import type { Analyzer, ClarificationPurpose, RawCandidate, SegmentAnalysis, SlackContextItem, SymbolSearch, UsageSink } from './ports';
+import { PreviewError, type Analyzer, type ClarificationPurpose, type PreviewInput, type PreviewResult, type RawCandidate, type SegmentAnalysis, type SlackContextItem, type SymbolSearch, type UsageSink } from './ports';
 import { decide, hasLiveCapacity, scoreDiscrepancy } from './prioritizer';
 import { RetrievalCache, retrieveContext, toEvidence } from './retrieval';
 import { buildFactSheet } from './facts';
 import { slackPointer } from './slack';
-import { contentTerms, leadingYesNo } from './text';
+import { EMPTY_PREVIEW_USAGE, discussionWindow, isSensitivePath, onlyAgrees, previewInputHash, previewSignal, proposesChange, rulePreview, sameDecision, validatePreview } from './preview';
+import { contentTerms, estimateTokens, leadingYesNo, words } from './text';
 import { addPosition, consensus, firmPositions, isOpen, isPriorRecord, needsIndependentAnswer, setStatus } from './tracker';
 import type {
   Claim,
@@ -15,6 +16,7 @@ import type {
   Discrepancy,
   DiscrepancyCategory,
   EngineEvent,
+  ImplementationPreview,
   Participant,
   ParticipantRole,
   Position,
@@ -41,6 +43,17 @@ export interface SessionInit {
   featureDescription?: string;
   priorDecisions?: PriorDecision[];
 }
+
+/** A preview analysis ready to run outside the session's queue (see `beginPreview`). */
+export interface PreviewJob {
+  previewId: string;
+  input: PreviewInput;
+  inputHash: string;
+  /** Last turn the analysis reads. */
+  through: number;
+}
+
+export type PreviewOutcome = { result: PreviewResult } | { error: string; usage: PreviewResult['usage'] };
 
 export type DiscrepancyAction = 'ask_now' | 'dismiss' | 'save_for_later' | 'restore' | 'mark_useful' | 'mark_not_useful';
 
@@ -254,6 +267,10 @@ export class SessionEngine {
     if (!analysis.meaningful) {
       this.state.metrics.analysesSkipped++;
       events.push({ type: 'analysis_skipped', segmentId: segment.id, reason: 'no requirement, proposal, agreement or code reference' });
+      // An imperative request ("remove their premium access") can still be a change worth previewing, and a
+      // short answer ("immediately, even if they're signed in") can still settle an open preview question.
+      const evidence = proposesChange(segment.text, analysis) ? await this.retrieve(analysis, events) : [];
+      this.notePreview(segment, analysis, evidence, [], events);
       await this.settle(segment.index, events);
       return events;
     }
@@ -275,6 +292,8 @@ export class SessionEngine {
       const d = await this.acceptCandidate(c, segment, events, slack);
       if (d) touched.push(d);
     }
+    // This turn's own retrieval: the long-lived focus would make every later turn look like the same decision.
+    this.notePreview(segment, analysis, evidence, touched, events);
     await this.settle(segment.index, events);
     this.recordVerbalAgreement(claim, touched, events);
     return events;
@@ -514,7 +533,7 @@ export class SessionEngine {
   }
 
   /** Slack messages still in the window whose topic overlaps this segment, most overlap first. */
-  private slackContext(analysis: SegmentAnalysis): SlackContextItem[] {
+  private slackContext(analysis: Pick<SegmentAnalysis, 'terms'>): SlackContextItem[] {
     const sl = this.state.slack;
     if (!sl) return [];
     const now = this.segments.at(-1)?.timestamp ?? 0;
@@ -529,6 +548,266 @@ export class SessionEngine {
       .sort((a, b) => b.overlap - a.overlap)
       .slice(0, SLACK_PER_SEGMENT)
       .map((x) => x.item);
+  }
+
+  // ------------------------------------------------------------------ implementation preview
+
+  /**
+   * Free, on every analysed turn: a turn that continues a decision already previewed joins it (so an
+   * open preview knows the discussion moved on); a new proposed change with code consequences gets a
+   * "worth reviewing" hint. No model call happens until someone opens or requests the preview.
+   */
+  private notePreview(segment: Segment, analysis: SegmentAnalysis, evidence: CodeEvidence[], touched: Discrepancy[], events: EngineEvent[]) {
+    const previews = (this.state.previews ??= []);
+    const cfg = this.cfg.preview;
+    // Code the turn names, not code that merely stays on screen while the topic changes.
+    const primary = evidence.filter((e) => !e.isTest && e.reason.startsWith('matches')).map((e) => e.symbolId);
+    // Dismissed decisions still absorb their turns, so a dismissed topic never comes back as a new hint.
+    const same = [...previews].reverse().find((p) => sameDecision(p, analysis.terms, primary, cfg.minOverlap));
+    if (same) return this.linkPreview(same, segment, analysis.terms, events);
+
+    const signal = previewSignal({ text: segment.text, analysis, evidence, touched });
+    const latest = previews.at(-1);
+    const lastTurn = latest ? this.segMap.get(latest.segmentIds.at(-1)!) : undefined;
+    const near = !!lastTurn && segment.index - lastTurn.index <= cfg.followUpTurns;
+    if (signal && signal.score >= cfg.hintThreshold) {
+      // A refinement right after a decision ("…and revoke their access as part of the undo") stays with it:
+      // a direct reply from someone else, or a nearby turn that shares a word with it.
+      const reply = !!lastTurn && segment.index - lastTurn.index === 1 && segment.participantId !== lastTurn.participantId;
+      if (latest && near && (reply || analysis.terms.some((t) => latest.terms.includes(t)))) {
+        latest.symbolIds = [...new Set([...latest.symbolIds, ...signal.symbolIds])];
+        return this.linkPreview(latest, segment, analysis.terms, events);
+      }
+      const p: ImplementationPreview = {
+        id: this.nextId('ip'),
+        trigger: 'auto',
+        status: 'suggested',
+        terms: signal.terms,
+        // The whole call path the turn reached: a later turn naming a callee is about the same decision.
+        symbolIds: [...new Set([...signal.symbolIds, ...evidence.filter((e) => !e.isTest).map((e) => e.symbolId)])],
+        reasons: signal.reasons,
+        score: signal.score,
+        segmentIds: [segment.id],
+        createdAtSegmentIndex: segment.index,
+        generatedThroughSegmentIndex: null,
+        newSegmentIds: [],
+        content: null,
+        evidenceIds: evidence.map((e) => e.id),
+        inputHash: null,
+        removed: [],
+        usage: { ...EMPTY_PREVIEW_USAGE },
+        generations: 0,
+        cacheHits: 0,
+        error: null,
+      };
+      previews.push(p);
+      this.state.metrics.previewsSuggested = (this.state.metrics.previewsSuggested ?? 0) + 1;
+      events.push({ type: 'preview_updated', preview: p, note: 'suggested' });
+      return;
+    }
+    // Questions, answers and clarifications right after a decision; unrelated remarks stay out of it.
+    const responds =
+      leadingYesNo(segment.text) !== null ||
+      analysis.kinds.some((k) => k !== 'statement' && k !== 'agreement') ||
+      analysis.terms.some((t) => latest?.terms.includes(t));
+    if (latest && near && !onlyAgrees(analysis) && responds) this.linkPreview(latest, segment, analysis.terms, events);
+  }
+
+  private linkPreview(p: ImplementationPreview, segment: Segment, terms: string[], events: EngineEvent[]) {
+    if (p.segmentIds.includes(segment.id)) return;
+    p.segmentIds.push(segment.id);
+    if (terms.length) p.terms = [...new Set([...p.terms, ...terms])].slice(0, 40);
+    if (p.generatedThroughSegmentIndex !== null && segment.index > p.generatedThroughSegmentIndex) p.newSegmentIds.push(segment.id);
+    if (p.status !== 'dismissed') events.push({ type: 'preview_updated', preview: p, note: 'linked' });
+  }
+
+  preview(id: string): ImplementationPreview {
+    const p = this.state.previews?.find((x) => x.id === id);
+    if (!p) throw new Error(`Unknown preview ${id}`);
+    return p;
+  }
+
+  dismissPreview(id: string): EngineEvent[] {
+    const p = this.preview(id);
+    p.status = 'dismissed';
+    return [{ type: 'preview_updated', preview: p, note: 'dismissed' }];
+  }
+
+  /**
+   * Step 1 of a preview, inside the session's queue: pick the decision (`previewId`, or for a manual
+   * request the decision the latest turns belong to, else a new one), retrieve its code within the
+   * preview budget, and hash what the analysis would read. Unchanged input reuses the earlier answer
+   * (`job` null, no model call). Otherwise the preview is marked generating and `job` is returned for
+   * `analyzePreview`, which runs outside the queue so the meeting keeps flowing.
+   */
+  async beginPreview(opts: { previewId?: string } = {}): Promise<{ preview: ImplementationPreview; job: PreviewJob | null; events: EngineEvent[] }> {
+    const events: EngineEvent[] = [];
+    const previews = (this.state.previews ??= []);
+    const cfg = this.cfg.preview;
+    let p: ImplementationPreview;
+    if (opts.previewId) {
+      p = this.preview(opts.previewId);
+    } else {
+      if (this.segments.length === 0) throw new Error('Nothing has been said yet');
+      // "Preview what we're discussing now": the last few turns, joined to their decision if there is one.
+      const recent = this.segments.slice(-4);
+      const joined = analyzeSegmentHeuristic({ state: this.state, segment: { ...recent.at(-1)!, text: recent.map((s) => s.text).join(' ') }, participant: this.state.participants[0]!, recent: [] });
+      const evidence = await this.retrieve(joined, events).catch(() => [] as CodeEvidence[]);
+      const primary = evidence.filter((e) => !e.isTest && e.reason.startsWith('matches')).map((e) => e.symbolId);
+      const same = [...previews].reverse().find((x) => x.status !== 'dismissed' && sameDecision(x, joined.terms, primary, cfg.minOverlap));
+      if (same) {
+        p = same;
+        for (const s of recent) if (!p.segmentIds.includes(s.id) && s.index > (this.segMap.get(p.segmentIds[0]!)?.index ?? -1)) this.linkPreview(p, s, [], events);
+      } else {
+        p = {
+          id: this.nextId('ip'),
+          trigger: 'manual',
+          status: 'suggested',
+          terms: joined.terms,
+          symbolIds: evidence.filter((e) => !e.isTest).map((e) => e.symbolId),
+          reasons: [],
+          score: 0,
+          segmentIds: recent.map((s) => s.id),
+          createdAtSegmentIndex: recent.at(-1)!.index,
+          generatedThroughSegmentIndex: null,
+          newSegmentIds: [],
+          content: null,
+          evidenceIds: evidence.map((e) => e.id),
+          inputHash: null,
+          removed: [],
+          usage: { ...EMPTY_PREVIEW_USAGE },
+          generations: 0,
+          cacheHits: 0,
+          error: null,
+        };
+        previews.push(p);
+      }
+    }
+    if (p.status === 'dismissed') p.status = p.content ? 'ready' : 'suggested'; // opened again on purpose
+
+    const discussion = discussionWindow(this.segments, p.segmentIds, cfg);
+    let evidence: CodeEvidence[];
+    try {
+      evidence = await this.previewEvidence(p, discussion);
+    } catch (err) {
+      return this.failPreview(p, `Could not search the repository: ${(err as Error).message}`, events);
+    }
+    const slack = this.slackContext({ terms: p.terms });
+    const requirementIds = this.state.requirements.filter((r) => r.status === 'confirmed').map((r) => r.id);
+    const inputHash = previewInputHash({
+      commitSha: this.state.commitSha,
+      segmentIds: discussion.map((s) => s.id),
+      evidenceIds: evidence.map((e) => e.id),
+      requirementIds,
+      slackIds: slack.map((x) => x.ref.id),
+      priorIds: this.state.priorDecisions.map((d) => d.id),
+    });
+    // Same input as last time (or as another decision's answer): reuse it, no model call.
+    const twin = p.status === 'ready' && p.inputHash === inputHash ? p : previews.find((x) => x !== p && x.status === 'ready' && x.inputHash === inputHash);
+    if (twin) {
+      if (twin !== p) Object.assign(p, { content: twin.content, slackRefs: twin.slackRefs, removed: twin.removed, evidenceIds: twin.evidenceIds, inputHash, generatedThroughSegmentIndex: twin.generatedThroughSegmentIndex });
+      p.status = 'ready';
+      p.newSegmentIds = [];
+      p.cacheHits++;
+      this.state.metrics.previewCacheHits = (this.state.metrics.previewCacheHits ?? 0) + 1;
+      events.push({ type: 'preview_updated', preview: p, note: 'reused' });
+      return { preview: p, job: null, events };
+    }
+    if (await this.overBudget(events)) return this.failPreview(p, 'The AI budget for this month is used up.', events);
+
+    p.status = 'generating';
+    p.error = null;
+    events.push({ type: 'preview_updated', preview: p, note: 'generating' });
+    const input: PreviewInput = { state: this.state, discussion, focusSegmentIds: p.segmentIds, evidence, slack, previous: p.content };
+    return { preview: p, job: { previewId: p.id, input, inputHash, through: discussion.at(-1)?.index ?? -1 }, events };
+  }
+
+  /** Step 2, outside the queue: the analysis. Reads only the job; changes no state; never throws. */
+  async analyzePreview(job: PreviewJob): Promise<PreviewOutcome> {
+    const a = this.deps.analyzer;
+    try {
+      return { result: a.previewImplementation ? await a.previewImplementation(job.input) : { raw: rulePreview(job.input), usage: EMPTY_PREVIEW_USAGE } };
+    } catch (err) {
+      return { error: err instanceof PreviewError ? err.message : 'The analysis failed.', usage: err instanceof PreviewError ? err.usage : EMPTY_PREVIEW_USAGE };
+    }
+  }
+
+  /** Step 3, back in the queue: validate the answer against the evidence and transcript, then store it. */
+  finishPreview(job: PreviewJob, outcome: PreviewOutcome): EngineEvent[] {
+    const p = this.preview(job.previewId);
+    const u = 'result' in outcome ? outcome.result.usage : outcome.usage;
+    p.usage = {
+      calls: p.usage.calls + u.calls,
+      inputTokens: p.usage.inputTokens + u.inputTokens,
+      cachedInputTokens: p.usage.cachedInputTokens + u.cachedInputTokens,
+      outputTokens: p.usage.outputTokens + u.outputTokens,
+      costUsd: p.usage.costUsd + u.costUsd,
+      model: u.model ?? p.usage.model,
+    };
+    if ('error' in outcome) return this.failPreview(p, outcome.error, []).events;
+    const v = validatePreview(outcome.result.raw, { evidence: job.input.evidence, segments: this.segMap, commitSha: this.state.commitSha, slack: job.input.slack, requirements: this.state.requirements });
+    p.content = v.content;
+    p.slackRefs = v.slackRefs;
+    p.removed = v.removed;
+    p.evidenceIds = job.input.evidence.map((e) => e.id);
+    p.inputHash = job.inputHash;
+    p.generatedThroughSegmentIndex = job.through;
+    p.newSegmentIds = p.newSegmentIds.filter((id) => (this.segMap.get(id)?.index ?? -1) > job.through);
+    p.generations++;
+    p.error = null;
+    if (p.status !== 'dismissed') p.status = 'ready';
+    this.state.metrics.previewsGenerated = (this.state.metrics.previewsGenerated ?? 0) + 1;
+    return [{ type: 'preview_updated', preview: p, note: 'ready' }];
+  }
+
+  /** Begin, analyse and finish in one go (manual input, replays and tests). */
+  async runPreview(opts: { previewId?: string } = {}): Promise<{ preview: ImplementationPreview; events: EngineEvent[] }> {
+    const { preview, job, events } = await this.beginPreview(opts);
+    if (job) events.push(...this.finishPreview(job, await this.analyzePreview(job)));
+    return { preview, events };
+  }
+
+  private failPreview(p: ImplementationPreview, error: string, events: EngineEvent[]) {
+    // An earlier answer stays visible with the error; the user can retry.
+    p.status = p.status === 'dismissed' ? 'dismissed' : 'failed';
+    p.error = error;
+    events.push({ type: 'preview_updated', preview: p, note: 'failed' });
+    return { preview: p, job: null, events };
+  }
+
+  /**
+   * Code for a preview, within the preview budget: a fresh retrieval from the decision's own words
+   * (implementations, their tests, one hop of calls), then code the decision already touched (cited by
+   * concerns, on screen, in focus). Never secrets-like paths; nothing outside the session's repository.
+   */
+  private async previewEvidence(p: ImplementationPreview, discussion: Segment[]): Promise<CodeEvidence[]> {
+    const search = this.deps.search;
+    if (!search) return [];
+    const own = discussion.filter((s) => p.segmentIds.includes(s.id));
+    const text = own.map((s) => s.text).join(' ');
+    const terms = [...new Set([...contentTerms(text), ...p.terms])];
+    const cfg = this.cfg.preview;
+    const r = await retrieveContext({ terms, words: words(text) }, search, { ...this.cfg.retrieval, maxSymbols: cfg.maxSymbols, contextBudgetTokens: cfg.contextBudgetTokens, maxTestsPerSymbol: cfg.maxTestsPerSymbol }, this.cache);
+    this.state.metrics.retrievals++;
+    if (r.cacheHit) this.state.metrics.retrievalCacheHits++;
+    const out: CodeEvidence[] = r.evidence.map((e) => ({ ...this.poolEvidence(e), reason: e.reason }));
+    const concerns = this.state.discrepancies.filter((d) => d.status !== 'dismissed' && d.codeRefs.some((ref) => p.symbolIds.includes(this.state.evidence.find((e) => e.id === ref.evidenceId)?.symbolId ?? '')));
+    const touched = [
+      ...concerns.flatMap((d) => d.codeRefs.map((ref) => ref.evidenceId)),
+      ...p.evidenceIds,
+      ...(this.state.focus && p.symbolIds.includes(this.state.focus.symbolId) ? [this.state.focus.evidenceId] : []),
+    ];
+    for (const id of touched) {
+      const e = this.state.evidence.find((x) => x.id === id);
+      if (e && !out.some((x) => x.id === e.id)) out.push(e);
+    }
+    for (const e of this.screenEvidence()) if (!out.some((x) => x.id === e.id)) out.push(e);
+    let tokens = 0;
+    return out.filter((e) => {
+      if (isSensitivePath(e.filePath)) return false;
+      tokens += estimateTokens(e.snippet);
+      return tokens <= cfg.contextBudgetTokens * 1.5;
+    });
   }
 
   // ------------------------------------------------------------------ screening (tiered analyzer)

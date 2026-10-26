@@ -7,9 +7,10 @@ import { SLACK_WINDOW_MS, type Discrepancy } from '@uc/core';
 import { CodeLink } from '@/components/CodeLink';
 import { SlackExcerpt } from '@/components/SlackLink';
 import { Avatar } from '@/components/ui/Avatar';
+import { PreviewSection } from '@/components/session/PreviewSection';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
 import { Transcript } from '@/components/session/Transcript';
-import type { SessionResponse } from '@/lib/api';
+import type { SessionResponse, SessionView } from '@/lib/api';
 import { TOPIC_WINDOW_MS, agoLabel, latestRequest, onScreen } from '@/lib/topic';
 import { cn } from '@/lib/utils';
 
@@ -18,7 +19,7 @@ import { cn } from '@/lib/utils';
  * large, then what is being discussed, then the last few lines of the conversation. Setup, replay
  * controls and engine statistics stay in the full view.
  */
-export function LivePanel(props: { id: string; data: SessionResponse; connected: boolean; act: Act; respond: Respond }) {
+export function LivePanel(props: { id: string; data: SessionResponse; connected: boolean; act: Act; respond: Respond; apply: (v: SessionView) => void }) {
   const { id, data, act, respond } = props;
   const { state, segments, session, repo } = data;
   const ended = session.status === 'ended';
@@ -87,6 +88,8 @@ export function LivePanel(props: { id: string; data: SessionResponse; connected:
         {queued.length > 0 && <Collapsible label={`Saved for later (${queued.length})`}>{queued.map((d) => card(d))}</Collapsible>}
         {settled.length > 0 && <Collapsible label={`Settled (${settled.length})`}>{settled.map((d) => card(d, true, !ended))}</Collapsible>}
       </section>
+
+      <PreviewSection sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={props.apply} />
 
       {(feature || request || focusEv || screen.length > 0) && (
         <section className="space-y-2.5 rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3" data-testid="now-discussing">

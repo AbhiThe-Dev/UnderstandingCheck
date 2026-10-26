@@ -71,6 +71,8 @@ function eventSummary(events: EngineEvent[]) {
           return { type: e.type, id: e.clarification.id };
         case 'requirement_recorded':
           return { type: e.type, id: e.requirement.id };
+        case 'preview_updated':
+          return { type: e.type, id: e.preview.id, status: e.preview.status, note: e.note };
         default:
           return e;
       }
@@ -463,6 +465,21 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
         throw new HttpError(422, (err as Error).message);
       }
     });
+    return c.json(view(snapshot));
+  });
+
+  /**
+   * Implementation preview: open a suggested one (`previewId`), or preview the current discussion.
+   * Answers at once with the preview generating; the result arrives over the session stream.
+   */
+  app.post('/api/sessions/:id/previews', async (c) => {
+    const body = await json(c, z.object({ previewId: z.string().trim().min(1).max(40).optional() }));
+    const r = await services.requestPreview(c.req.param('id'), body);
+    return c.json({ previewId: r.previewId, ...view(r.snapshot) }, 202);
+  });
+
+  app.post('/api/sessions/:id/previews/:pid/dismiss', async (c) => {
+    const { snapshot } = await services.dismissPreview(c.req.param('id'), c.req.param('pid'));
     return c.json(view(snapshot));
   });
 

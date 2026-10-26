@@ -13,6 +13,8 @@ import type {
   Interpretation,
   Participant,
   Position,
+  PreviewContent,
+  PreviewUsage,
   Segment,
   SessionState,
   SlackRef,
@@ -55,6 +57,8 @@ export interface LlmRequest<T> {
   effort?: ReasoningEffort;
   /** Groups requests that share a prompt prefix so the provider can reuse its cache (e.g. the session id). */
   cacheKey?: string;
+  /** Overrides the provider's default timeout, for answers known to take longer; such calls are not retried. */
+  timeoutMs?: number;
 }
 
 export interface LlmUsage {
@@ -83,6 +87,16 @@ export class LlmOutputError extends Error {
     message: string,
     readonly usage: LlmUsage,
     readonly finishReason?: string,
+  ) {
+    super(message);
+  }
+}
+
+/** A preview analysis produced no usable answer; `usage` is what it cost anyway. */
+export class PreviewError extends Error {
+  constructor(
+    message: string,
+    readonly usage: PreviewUsage,
   ) {
     super(message);
   }
@@ -196,6 +210,57 @@ export interface SlackContextItem {
   pointer: string;
 }
 
+/** A code citation as an analyzer writes it: an evidence id (E1…) and lines inside that evidence. */
+export interface RawCodeRef {
+  evidenceId: string;
+  startLine: number;
+  endLine: number;
+  note?: string;
+}
+
+/** What the preview analysis reads. Everything in it is bounded by the engine (no repository dumps). */
+export interface PreviewInput {
+  state: SessionState;
+  /** Turns of the discussion, oldest first (the decision's own turns plus a little context). */
+  discussion: Segment[];
+  /** The decision's own turns within `discussion`. */
+  focusSegmentIds: string[];
+  evidence: CodeEvidence[];
+  /** Slack messages that share the topic; their text is for analysis only, never for output. */
+  slack: SlackContextItem[];
+  /** The preview's earlier content, when updating it after the discussion moved on. */
+  previous: PreviewContent | null;
+}
+
+/** An analyzer's preview before validation. Every claim about code carries refs; validation checks them. */
+export interface RawPreview {
+  noImplications: string | null;
+  proposedChange: string;
+  summary: string;
+  currentBehavior: { text: string; refs: RawCodeRef[] }[];
+  unknowns: string[];
+  impacts: { text: string; likelihood: 'likely' | 'possible'; refs: RawCodeRef[] }[];
+  scenarios: {
+    scenario: string;
+    current: string;
+    currentBasis: 'verified' | 'inferred' | 'unknown';
+    currentRefs: RawCodeRef[];
+    intended: string;
+    intendedBasis: 'stated' | 'confirmed' | 'unspecified';
+    intendedQuote: { segmentId: string; quote: string } | null;
+    /** For `confirmed`: the confirmed requirement (r1…) it comes from. */
+    requirementId: string | null;
+  }[];
+  questions: { text: string; why: string; status: 'open' | 'answered'; answer: { segmentId: string; quote: string } | null }[];
+  clarification: string | null;
+  slackRefs: { refId: string; note: string }[];
+}
+
+export interface PreviewResult {
+  raw: RawPreview;
+  usage: PreviewUsage;
+}
+
 export interface ClarificationDraft {
   format: ClarificationFormat;
   question: string;
@@ -235,4 +300,9 @@ export interface Analyzer {
   screen?(input: ScreenInput): Promise<ScreenFlag[]>;
   /** Tiered analyzers only: full candidate generation for a flagged stretch. */
   deepCandidates?(input: CandidateInput): Promise<RawCandidate[]>;
+  /**
+   * What a proposed change would mean for the existing code. Called only when a preview is opened
+   * or requested, never per turn. Throws when no usable answer was produced.
+   */
+  previewImplementation?(input: PreviewInput): Promise<PreviewResult>;
 }

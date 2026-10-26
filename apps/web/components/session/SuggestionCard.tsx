@@ -273,7 +273,7 @@ function Expandable({ text }: { text: string }) {
 }
 
 /** The question to put to the group, worded to be read out as is. */
-function AskBlock({ question, context }: { question: string; context: string | null }) {
+export function AskBlock({ question, context, label = 'Ask the group' }: { question: string; context: string | null; label?: string }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     void navigator.clipboard?.writeText(question).then(() => {
@@ -284,7 +284,7 @@ function AskBlock({ question, context }: { question: string; context: string | n
   return (
     <div className="rounded-lg border border-[var(--color-accent)]/25 bg-[var(--color-accent-soft)] px-3.5 py-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-semibold tracking-wide text-[var(--color-accent)] uppercase">Ask the group</span>
+        <span className="text-[11px] font-semibold tracking-wide text-[var(--color-accent)] uppercase">{label}</span>
         <button onClick={copy} className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-surface)]" aria-label="Copy question">
           {copied ? <Check className="size-3" aria-hidden /> : <Copy className="size-3" aria-hidden />}
           {copied ? 'Copied' : 'Copy'}

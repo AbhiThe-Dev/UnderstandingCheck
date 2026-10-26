@@ -1,6 +1,6 @@
 import type { DiscrepancyCategory, PriorDecision } from '@uc/core';
 
-export type RepoName = 'approvals' | 'billing';
+export type RepoName = 'approvals' | 'billing' | 'subscriptions';
 
 export interface FixtureCase {
   id: string;

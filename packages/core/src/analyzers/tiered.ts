@@ -3,6 +3,8 @@ import type {
   Analyzer,
   CandidateInput,
   ClarificationDraft,
+  PreviewInput,
+  PreviewResult,
   ClarificationPurpose,
   RawCandidate,
   ResponseInterpretation,
@@ -55,5 +57,10 @@ export class TieredAnalyzer implements Analyzer {
 
   interpretResponse(text: string, d: Discrepancy, opts: { clarification?: Clarification; latestOtherPosition?: Position }): Promise<ResponseInterpretation> {
     return this.llm.interpretResponse(text, d, opts);
+  }
+
+  /** Requested by a person, so it goes straight to the large model (no screen in front). */
+  previewImplementation(input: PreviewInput): Promise<PreviewResult> {
+    return this.llm.previewImplementation(input);
   }
 }

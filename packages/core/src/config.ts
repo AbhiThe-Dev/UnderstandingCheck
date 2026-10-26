@@ -49,6 +49,22 @@ export interface EngineConfig {
     /** Flags acted on per screen (each costs one large-model call). */
     maxFlags: number;
   };
+  /** Implementation preview: when to hint, and how much the on-demand analysis may read. */
+  preview: {
+    /** Detector score (0–1) at which a turn earns the "worth reviewing" hint. */
+    hintThreshold: number;
+    /** Code the analysis may read: more than a turn gets, since call paths and tests decide the answer. */
+    maxSymbols: number;
+    contextBudgetTokens: number;
+    maxTestsPerSymbol: number;
+    /** Conversation the analysis reads. */
+    maxDiscussionTurns: number;
+    maxDiscussionChars: number;
+    /** A later turn belongs to a decision when this share of its terms overlaps (or it touches the same code). */
+    minOverlap: number;
+    /** Meaningful turns right after a decision's last turn that count as its follow-up even without shared terms. */
+    followUpTurns: number;
+  };
   /** How many recent segments count as "right after" a proposal, for agreement detection. */
   agreementWindow: number;
   recentWindow: number;
@@ -66,7 +82,7 @@ export interface EngineConfig {
   };
 }
 
-export type LlmOperation = 'extraction' | 'candidates' | 'screen' | 'clarification' | 'response';
+export type LlmOperation = 'extraction' | 'candidates' | 'screen' | 'clarification' | 'response' | 'preview';
 
 export const DEFAULT_CONFIG: EngineConfig = {
   scoring: {
@@ -92,17 +108,28 @@ export const DEFAULT_CONFIG: EngineConfig = {
   },
   rateLimit: { maxLivePerSession: 6, maxOpenLive: 3 },
   retrieval: { maxSymbols: 6, contextBudgetTokens: 2500, slackBudgetTokens: 800, minScore: 1.2, maxTestsPerSymbol: 1 },
+  preview: {
+    hintThreshold: 0.6,
+    maxSymbols: 8,
+    contextBudgetTokens: 4000,
+    maxTestsPerSymbol: 2,
+    maxDiscussionTurns: 16,
+    maxDiscussionChars: 6000,
+    minOverlap: 0.4,
+    followUpTurns: 3,
+  },
   screening: { intervalMs: 60_000, maxTurns: 8, overlap: 3, maxFlags: 2 },
   agreementWindow: 3,
   recentWindow: 12,
   budget: { workspaceLimitUsd: 5 },
   llm: {
     // Candidates were cut off at 2000 (15% of answers in a live run): hidden reasoning uses ~1000 of it.
-    maxOutputTokens: { extraction: 400, candidates: 4000, screen: 600, clarification: 800, response: 300 },
+    // A preview writes several short sections; it is requested by a person, so it runs at most a few times per meeting.
+    maxOutputTokens: { extraction: 400, candidates: 4000, screen: 600, clarification: 800, response: 300, preview: 3500 },
     factSheetOutputTokens: 5000,
     maxInputChars: 24_000,
     // Spotting a conflict in cited code needs little reasoning; screening and classifying need almost none.
-    effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal' },
+    effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal', preview: 'low' },
   },
 };
 
@@ -203,11 +230,16 @@ export function estimateCostUsd(
   return ((inputTokens - cached) * p.inputPerMTok + cached * (p.cachedInputPerMTok ?? p.inputPerMTok) + outputTokens * p.outputPerMTok) / 1_000_000;
 }
 
-/** Fact-sheet prompt and candidate model tier from `UC_PROMPT_STYLE` (raw | facts) and `UC_CANDIDATES_TIER` (cheap | reasoning). */
-export function promptOptionsFrom(env: Record<string, string | undefined>): { promptStyle: 'raw' | 'facts'; candidatesTier?: 'cheap' | 'reasoning' } {
+/**
+ * Fact-sheet prompt and model tiers from `UC_PROMPT_STYLE` (raw | facts), `UC_CANDIDATES_TIER` and
+ * `UC_PREVIEW_TIER` (cheap | reasoning).
+ */
+export function promptOptionsFrom(env: Record<string, string | undefined>): { promptStyle: 'raw' | 'facts'; candidatesTier?: 'cheap' | 'reasoning'; previewTier?: 'cheap' | 'reasoning' } {
+  const tier = (v: string | undefined) => (v === 'cheap' || v === 'reasoning' ? v : undefined);
   return {
     promptStyle: env.UC_PROMPT_STYLE === 'facts' ? 'facts' : 'raw',
-    ...(env.UC_CANDIDATES_TIER === 'cheap' || env.UC_CANDIDATES_TIER === 'reasoning' ? { candidatesTier: env.UC_CANDIDATES_TIER } : {}),
+    ...(tier(env.UC_CANDIDATES_TIER) ? { candidatesTier: tier(env.UC_CANDIDATES_TIER) } : {}),
+    ...(tier(env.UC_PREVIEW_TIER) ? { previewTier: tier(env.UC_PREVIEW_TIER) } : {}),
   };
 }
 

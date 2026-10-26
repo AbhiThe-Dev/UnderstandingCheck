@@ -45,7 +45,7 @@ export class OpenAiProvider implements LlmProvider {
         ...(withEffort && req.effort ? { reasoning_effort: req.effort } : {}),
         ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
         stream: false,
-      });
+      }, req.timeoutMs ? { timeout: req.timeoutMs, maxRetries: 0 } : undefined);
     let res;
     try {
       res = await create(!this.noEffort.has(model));

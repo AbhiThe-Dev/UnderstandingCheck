@@ -7,6 +7,7 @@ import { Suspense, useEffect, useState } from 'react';
 import type { TranscriptSegmentInput } from '@uc/core';
 import { InputPanel } from '@/components/session/InputPanel';
 import { LivePanel } from '@/components/session/LivePanel';
+import { PreviewSection } from '@/components/session/PreviewSection';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
 import { Transcript } from '@/components/session/Transcript';
 import { Badge, Button, Card, CardHeader, CardTitle, Empty } from '@/components/ui/primitives';
@@ -47,7 +48,7 @@ function Copilot() {
   const act: Act = async (did, action) => apply(await api<SessionView>(`/api/sessions/${id}/discrepancies/${did}/actions`, { body: { action } }));
   const respond: Respond = async (cid, participantId, body) =>
     apply(await api<SessionView>(`/api/sessions/${id}/clarifications/${cid}/responses`, { body: { participantId, ...body } }));
-  if (search.get('view') === 'panel') return <LivePanel id={id} data={data} connected={connected} act={act} respond={respond} />;
+  if (search.get('view') === 'panel') return <LivePanel id={id} data={data} connected={connected} act={act} respond={respond} apply={apply} />;
 
   const end = async () => {
     apply(await api<SessionView>(`/api/sessions/${id}/end`, { method: 'POST' }));
@@ -279,6 +280,7 @@ function Copilot() {
               htmlUrl={repo?.htmlUrl}
             />
           ))}
+          <PreviewSection sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={apply} />
           {queued.length > 0 && (
             <div>
               <button className="text-xs text-[var(--color-muted)] hover:underline" onClick={() => setShowQueued((v) => !v)}>

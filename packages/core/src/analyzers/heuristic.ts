@@ -4,6 +4,8 @@ import type {
   CandidateInput,
   ClarificationDraft,
   ClarificationPurpose,
+  PreviewInput,
+  PreviewResult,
   RawCandidate,
   ResponseInterpretation,
   SegmentAnalysis,
@@ -35,6 +37,7 @@ import {
 } from '../text';
 import { AGREEMENT_LOOKBACK, HIGH_CONSEQUENCE, claimsSince, isAddressed, mentions, rankEffects, stance } from '../signals';
 import { analyzeSegmentHeuristic, requirementOwner } from '../understanding';
+import { EMPTY_PREVIEW_USAGE, rulePreview } from '../preview';
 
 
 const KEEP_WORDS = ['keep', 'keeps', 'still', 'retain', 'remain', 'stay', 'continue', 'leave', 'unchanged', 'untouched', 'grace', 'only', 'just', 'same', 'as-is'];
@@ -543,6 +546,11 @@ export class HeuristicAnalyzer implements Analyzer {
 
     void targetParticipantId;
     return { ...empty, format: 'verbal', question: d.title, answerKey: {} };
+  }
+
+  /** Code facts and unmentioned side effects only (free); consequences need the AI analyzer. */
+  async previewImplementation(input: PreviewInput): Promise<PreviewResult> {
+    return { raw: rulePreview(input), usage: EMPTY_PREVIEW_USAGE };
   }
 
   // ---- Module 6 helper: map a free-form answer onto an interpretation ----

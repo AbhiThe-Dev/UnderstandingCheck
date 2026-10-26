@@ -11,6 +11,7 @@ import {
   type Analyzer,
   type EngineEvent,
   type LlmProvider,
+  type PreviewJob,
   type PriorDecision,
   type SessionState,
 } from '@uc/core';
@@ -311,14 +312,17 @@ export class Services {
     return { engine, row };
   }
 
-  /** Run one engine operation for a session, serialized, then persist and notify listeners. */
-  async run<T extends EngineEvent[]>(id: string, op: (engine: SessionEngine, row: SessionRow) => Promise<T>, opts: { ended?: boolean } = {}) {
+  /**
+   * Run one engine operation for a session, serialized, then persist and notify listeners.
+   * `ended` finalizes the session; `afterEnd` lets work started before the end still land.
+   */
+  async run<T extends EngineEvent[]>(id: string, op: (engine: SessionEngine, row: SessionRow) => Promise<T>, opts: { ended?: boolean; afterEnd?: boolean } = {}) {
     const prev = this.queues.get(id) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(async () => {
       const { engine, row } = await this.engineFor(id);
-      if (row.status === 'ended' && !opts.ended) throw new HttpError(409, 'Session has ended');
+      if (row.status === 'ended' && !opts.ended && !opts.afterEnd) throw new HttpError(409, 'Session has ended');
       const events = await op(engine, row);
-      await this.store.saveSessionState(id, engine.state, engine.segments, opts);
+      await this.store.saveSessionState(id, engine.state, engine.segments, { ended: opts.ended });
       const snapshot: SessionSnapshot = { state: engine.state, segments: engine.segments, status: opts.ended ? 'ended' : row.status };
       for (const l of this.listeners.get(id) ?? []) l(snapshot, events);
       if (!opts.ended) this.slackContext?.onRun(row, events, engine.state);
@@ -343,6 +347,61 @@ export class Services {
         if (!(err instanceof HttpError)) console.error(`[api] screen failed for ${id}: ${(err as Error).message}`);
       })
       .finally(() => this.screening.delete(id));
+  }
+
+  /** Preview analyses in flight, by `${sessionId}:${previewId}`. */
+  private previewing = new Map<string, Promise<void>>();
+
+  /**
+   * Open a suggested implementation preview, or preview the current discussion (no `previewId`).
+   * Retrieval and the cache check run in the session's queue; the model call runs outside it, so the
+   * meeting keeps being analysed meanwhile, and its answer is validated back in the queue. Returns at
+   * once; `done` settles when the preview is ready or failed. A repeat request for a preview that is
+   * already generating joins the running one instead of paying for a second call.
+   */
+  async requestPreview(id: string, opts: { previewId?: string } = {}) {
+    const running = opts.previewId ? this.previewing.get(`${id}:${opts.previewId}`) : undefined;
+    if (running) return { previewId: opts.previewId!, snapshot: await this.snapshot(id), done: running };
+    let job: PreviewJob | null = null;
+    let previewId = '';
+    const { snapshot } = await this.run(id, async (engine, row) => {
+      // The repository may have been disconnected or its access revoked since the meeting started.
+      if (row.repositoryId) {
+        const repo = await this.store.getRepository(row.repositoryId);
+        if (!repo || repo.indexingStatus === 'revoked') throw new HttpError(409, 'The repository is no longer accessible, so its code cannot be previewed');
+      }
+      try {
+        const r = await engine.beginPreview(opts);
+        job = r.job;
+        previewId = r.preview.id;
+        return r.events;
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        throw new HttpError(/^Unknown preview/.test((err as Error).message) ? 404 : 422, (err as Error).message);
+      }
+    });
+    const pending = job as PreviewJob | null;
+    if (!pending) return { previewId, snapshot, done: Promise.resolve() };
+    const key = `${id}:${previewId}`;
+    const done = (async () => {
+      const { engine } = await this.engineFor(id);
+      const outcome = await engine.analyzePreview(pending);
+      await this.run(id, async (e) => e.finishPreview(pending, outcome), { afterEnd: true });
+    })()
+      .catch((err) => console.error(`[api] preview failed for ${id}: ${(err as Error).message}`))
+      .finally(() => this.previewing.delete(key));
+    this.previewing.set(key, done);
+    return { previewId, snapshot, done };
+  }
+
+  async dismissPreview(id: string, previewId: string) {
+    return this.run(id, async (engine) => {
+      try {
+        return engine.dismissPreview(previewId);
+      } catch (err) {
+        throw new HttpError(404, (err as Error).message);
+      }
+    });
   }
 
   /** End a meeting: screen whatever the last timer did not cover, then finalize. */

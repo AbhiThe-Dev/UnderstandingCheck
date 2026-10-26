@@ -53,7 +53,8 @@ export async function retrieveContext(
   cfg: EngineConfig['retrieval'],
   cache?: RetrievalCache,
 ): Promise<RetrievalResult> {
-  const key = `${search.commitSha}:${[...query.terms].sort().join(',')}`;
+  // The budget is part of the key: a preview reads more code for the same terms than a single turn does.
+  const key = `${search.commitSha}:${cfg.maxSymbols}/${cfg.contextBudgetTokens}/${cfg.maxTestsPerSymbol}:${[...query.terms].sort().join(',')}`;
   const cached = cache?.get(key);
   if (cached) return { ...cached, cacheHit: true };
 

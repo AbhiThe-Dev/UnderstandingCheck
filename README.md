@@ -133,6 +133,19 @@ When a session ends, its **confirmed** decisions become workspace-level records 
 
 Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requirements/:id/status`, `GET /api/requirements/export`. Session creation accepts `includeRecords: false` to skip the check.
 
+### Implementation preview
+
+While a change is being discussed ("when a customer downgrades, remove their premium access"), the panel can show what it would mean for the existing code: current behavior, predicted impact, a scenario table, open decisions and one clarification question.
+
+- **Free detection:** after each analysed turn, rules flag a proposed change that touches code with consequential side effects (or has just produced a code-backed concern). That earns a quiet "Implementation impact worth reviewing" hint. Later turns about the same decision join it instead of creating new hints. Detection never calls a model.
+- **On demand:** the analysis runs only when someone clicks **View preview** or **Preview the current discussion**. One structured call goes to the small model by default (`UC_PREVIEW_TIER`). Retrieval reads the decision's own turns within a 4k-token code budget: implementations, tests, one hop of calls. The call runs outside the session queue, so the meeting keeps being analysed meanwhile.
+- **Cached:** the answer is stored with a hash of everything it read. Asking again with no relevant change reuses it. When people keep discussing the decision, the panel offers **Update**, which re-reads the decision with the earlier preview as context.
+- **Checked:** every statement about current behavior must cite code the analysis was shown, at the session's commit, inside the cited symbol; otherwise it is dropped. Predicted impacts are labelled as predictions. An intended behavior counts as *said* only with the speaker's verbatim words, and as *confirmed* only with a confirmed requirement. An open question counts as answered only with a quote that answers it. Removed claims are counted on the card.
+- **Without a model** (`ANALYZER=heuristic`), the preview lists the code's side effects and its tests, cited, and does not reason about consequences.
+- **Cost:** shown per preview. On the downgrade demo (`demo/subscriptions`), the small model took ~25 s and ~$0.006; `gpt-5` took ~42 s and ~$0.03 with the same findings.
+
+Endpoints: `POST /api/sessions/:id/previews` (`{ previewId? }`, returns 202; the result arrives on the session stream), `POST /api/sessions/:id/previews/:pid/dismiss`.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -142,6 +155,7 @@ Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requ
 | `UC_LLM_WITH_RULES` | on | `off` stops the AI analyzer from also keeping the rules' findings each turn (on: rules and AI together, so neither's catches are lost) |
 | `UC_SURFACING` | recall | AI analyzers show suggestions more readily (live threshold 0.45, up to 12 per meeting, discussion hold expires after a turn). `balanced` restores the rules-only settings |
 | `UC_PROMPT_STYLE`, `UC_CANDIDATES_TIER` | `raw`, `reasoning` | `facts` adds a code-computed fact sheet the model checks; `cheap` runs candidate analysis on the small model. Measured: about 70% cheaper, slightly more misses without rules |
+| `UC_PREVIEW_TIER` | `cheap` | Model tier for implementation previews; `reasoning` uses the large model (slower, ~5× the cost) |
 | `OPENAI_API_KEY` | — | **Not provided.** Required only for the model-backed analyzer |
 | `UC_MODEL_CHEAP` / `UC_MODEL_REASONING` | `gpt-5-mini` / `gpt-5` | Model names per tier — verify they are current for your account |
 | `UC_MODEL_PRICES_JSON` | built-in table | Override per-model prices used for cost estimates, e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}` |

@@ -346,6 +346,97 @@ export const Focus = z.object({
 });
 export type Focus = z.infer<typeof Focus>;
 
+// ---------- Implementation preview ----------
+
+/** Something the retrieved code shows today. Validation guarantees at least one resolvable code citation. */
+export const PreviewFact = z.object({ text: z.string(), refs: z.array(CodeRef) });
+export type PreviewFact = z.infer<typeof PreviewFact>;
+
+/** A predicted consequence of building the change as discussed: never a claim about current code. */
+export const PreviewImpact = z.object({ text: z.string(), likelihood: z.enum(['likely', 'possible']), refs: z.array(CodeRef) });
+export type PreviewImpact = z.infer<typeof PreviewImpact>;
+
+export const PreviewScenario = z.object({
+  scenario: z.string(),
+  /** verified: the cited code does this today; inferred: a prediction; unknown: the code shown does not say. */
+  current: z.object({ text: z.string(), basis: z.enum(['verified', 'inferred', 'unknown']), refs: z.array(CodeRef) }),
+  /** stated: someone said it (quote checked); confirmed: a confirmed requirement; unspecified: nobody decided. */
+  intended: z.object({ text: z.string(), basis: z.enum(['stated', 'confirmed', 'unspecified']), quote: Quote.nullable() }),
+});
+export type PreviewScenario = z.infer<typeof PreviewScenario>;
+
+export const PreviewQuestion = z.object({
+  text: z.string(),
+  why: z.string(),
+  /** answered only with a verbatim quote from the meeting that answers it. */
+  status: z.enum(['open', 'answered']),
+  answer: Quote.nullable(),
+});
+export type PreviewQuestion = z.infer<typeof PreviewQuestion>;
+
+export const PreviewContent = z.object({
+  proposedChange: z.string(),
+  summary: z.string(),
+  /** sufficient: current behavior is backed by code; partial: some of it; insufficient: none could be established. */
+  contextStatus: z.enum(['sufficient', 'partial', 'insufficient']),
+  currentBehavior: z.array(PreviewFact),
+  /** What the code shown could not establish. */
+  unknowns: z.array(z.string()),
+  impacts: z.array(PreviewImpact),
+  scenarios: z.array(PreviewScenario),
+  questions: z.array(PreviewQuestion),
+  clarification: z.string().nullable(),
+  /** Set when the discussion turned out not to change software behavior; the rest is then empty. */
+  noImplications: z.string().nullable(),
+});
+export type PreviewContent = z.infer<typeof PreviewContent>;
+
+export const PreviewUsage = z.object({
+  calls: z.number().int(),
+  inputTokens: z.number().int(),
+  cachedInputTokens: z.number().int(),
+  outputTokens: z.number().int(),
+  costUsd: z.number(),
+  model: z.string().nullable(),
+});
+export type PreviewUsage = z.infer<typeof PreviewUsage>;
+
+/**
+ * What a proposed change would mean for the existing code, for one technical decision in the meeting.
+ * Detection is free (rules); the analysis runs only when someone opens or requests the preview.
+ */
+export const ImplementationPreview = z.object({
+  id: z.string(),
+  trigger: z.enum(['auto', 'manual']),
+  /** suggested: a hint only (no model call yet); generating; ready; failed; dismissed. */
+  status: z.enum(['suggested', 'generating', 'ready', 'failed', 'dismissed']),
+  /** Stemmed topic terms and primary code symbols, for matching later turns to the same decision. */
+  terms: z.array(z.string()),
+  symbolIds: z.array(z.string()),
+  /** Why the detector thought this worth a look (empty for manual requests). */
+  reasons: z.array(z.string()),
+  score: z.number(),
+  /** Turns that belong to this decision, in order. */
+  segmentIds: z.array(z.string()),
+  createdAtSegmentIndex: z.number().int(),
+  /** Last turn the current content was generated from (null before the first generation). */
+  generatedThroughSegmentIndex: z.number().int().nullable(),
+  /** Turns linked to this decision after the content was generated (the preview may be out of date). */
+  newSegmentIds: z.array(z.string()),
+  content: PreviewContent.nullable(),
+  evidenceIds: z.array(z.string()),
+  slackRefs: z.array(SlackCitation).optional(),
+  /** Hash of everything the analysis read; unchanged input reuses the content without a model call. */
+  inputHash: z.string().nullable(),
+  /** Claims validation removed from the model's answer (unsupported or invented references). */
+  removed: z.array(z.object({ reason: z.string(), detail: z.string() })),
+  usage: PreviewUsage,
+  generations: z.number().int(),
+  cacheHits: z.number().int(),
+  error: z.string().nullable(),
+});
+export type ImplementationPreview = z.infer<typeof ImplementationPreview>;
+
 export const EngineMetrics = z.object({
   segmentsSeen: z.number().int(),
   analysesRun: z.number().int(),
@@ -367,6 +458,10 @@ export const EngineMetrics = z.object({
   deepCalls: z.number().int().optional(),
   /** Fact-sheet facts the model said the transcript or code contradicts (rule mistakes to fix). */
   factsDisputed: z.number().int().optional(),
+  /** Implementation previews: hints shown, analyses run, and requests answered from cache. */
+  previewsSuggested: z.number().int().optional(),
+  previewsGenerated: z.number().int().optional(),
+  previewCacheHits: z.number().int().optional(),
 });
 export type EngineMetrics = z.infer<typeof EngineMetrics>;
 
@@ -421,6 +516,8 @@ export const SessionState = z.object({
       lastAt: z.number().int(),
     })
     .optional(),
+  /** Implementation previews for decisions discussed in this meeting. Absent in older sessions. */
+  previews: z.array(ImplementationPreview).optional(),
   /** Slack messages seen this session, by reference (never their text). */
   slackRefs: z.array(SlackRef).optional(),
   /** The latest Slack search results that still count as context; `at` is meeting time. */
@@ -452,4 +549,5 @@ export type EngineEvent =
   | { type: 'screen_observed'; evidenceIds: string[]; files: string[] }
   | { type: 'slack_observed'; refIds: string[] }
   | { type: 'screened'; segments: number; flags: number }
-  | { type: 'fact_disputed'; factId: string; fact: string; reason: string };
+  | { type: 'fact_disputed'; factId: string; fact: string; reason: string }
+  | { type: 'preview_updated'; preview: ImplementationPreview; note: string };
