@@ -6,6 +6,7 @@ import {
   TieredAnalyzer,
   effortFrom,
   pricesFrom,
+  promptOptionsFrom,
   type Analyzer,
   type EngineEvent,
   type LlmProvider,
@@ -216,7 +217,14 @@ export class Services {
 
   private analyzerFor(sessionId: string): Analyzer {
     if (this.analyzerMode !== 'heuristic' && this.llm) {
-      const llm = new LlmAnalyzer({ provider: this.llm, sessionId, usage: this.store.usageSink(sessionId), limits: llmLimits(), prices: pricesFrom(process.env.UC_MODEL_PRICES_JSON) });
+      const llm = new LlmAnalyzer({
+        provider: this.llm,
+        sessionId,
+        usage: this.store.usageSink(sessionId),
+        limits: llmLimits(),
+        prices: pricesFrom(process.env.UC_MODEL_PRICES_JSON),
+        ...promptOptionsFrom(process.env),
+      });
       return this.analyzerMode === 'tiered' ? new TieredAnalyzer(llm) : llm;
     }
     return new HeuristicAnalyzer();

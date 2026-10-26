@@ -10,7 +10,6 @@ import type {
 } from '../ports';
 import type { Claim, Clarification, Discrepancy, Effect, Interpretation, Position, SessionState } from '../types';
 import {
-  CONSEQUENCE_WEIGHT,
   beneficiaryOf,
   describeEffect,
   effectKeywords,
@@ -34,9 +33,9 @@ import {
   truncate,
   words,
 } from '../text';
+import { AGREEMENT_LOOKBACK, HIGH_CONSEQUENCE, claimsSince, isAddressed, mentions, rankEffects, stance } from '../signals';
 import { analyzeSegmentHeuristic, requirementOwner } from '../understanding';
 
-const HIGH_CONSEQUENCE = new Set(['permission', 'financial', 'irreversible', 'external']);
 
 const KEEP_WORDS = ['keep', 'keeps', 'still', 'retain', 'remain', 'stay', 'continue', 'leave', 'unchanged', 'untouched', 'grace', 'only', 'just', 'same', 'as-is'];
 // Deliberately excludes words like "end", "also", "take" that show up in unrelated phrasing ("end of the day").
@@ -44,8 +43,6 @@ const REVERSE_WORDS = ['revoke', 'remove', 'lose', 'loses', 'terminate', 'cancel
 const NOTIFY_WORDS = ['notify', 'tell', 'email', 'inform', 'message', 'send', 'told', 'notified', 'informed'];
 const EXCLUDE_WORDS = ['exclude', 'without', 'separate', 'skip', 'never', 'different', 'shouldn'];
 
-/** How many claims back an agreement can refer to a proposal. */
-const AGREEMENT_LOOKBACK = 3;
 
 const stems = (ws: string[]) => [...new Set(ws.map((w) => stem(w)))];
 
@@ -53,42 +50,10 @@ function quoteOf(text: string): string {
   return truncate(text.trim(), 220);
 }
 
-function claimsSince(state: SessionState, segmentId: string | null): Claim[] {
-  if (!segmentId) return state.claims;
-  const idx = state.claims.findIndex((c) => c.segmentId === segmentId);
-  return idx < 0 ? state.claims : state.claims.slice(idx);
-}
-
-function isAddressed(effect: Effect, claims: Claim[], exclude: string[] = []): boolean {
-  const kw = new Set(effectKeywords(effect, exclude));
-  return claims.some((c) => !c.kinds.includes('question') && c.terms.some((t) => kw.has(t)));
-}
-
-function mentions(effect: Effect, claim: Claim, exclude: string[] = []): boolean {
-  const kw = new Set(effectKeywords(effect, exclude));
-  return claim.terms.some((t) => kw.has(t));
-}
-
-/** Verbs that take something away. A statement using them argues *against* the thing it names. */
-const REMOVAL_RE = /\b(lose|loses|revoke|revokes|revoked|remove|removes|removed|disable|disables|disabled|block|blocks|blocked|prevent|prevents|skip|skips|exclude|excludes|drop|drops)\b/i;
-
-/** Stance toward the topic: removal verbs ("lose access", "skip the email") argue against it. */
-function stance(c: Pick<Claim, 'polarity' | 'text'>): Claim['polarity'] {
-  if (c.polarity !== 'positive') return c.polarity;
-  return REMOVAL_RE.test(c.text) ? 'negative' : 'positive';
-}
 
 /** Words that name the act of reversing, which two statements can share without being about the same thing. */
 const REVERSAL_STEMS = new Set(['undo', 'revert', 'revers', 'cancel', 'rollback', 'roll', 'back', 'retract', 'rescind'].map((w) => stem(w)));
 
-function rankEffects(effects: Effect[]): Effect[] {
-  return [...effects].sort(
-    (a, b) =>
-      CONSEQUENCE_WEIGHT[b.category] - CONSEQUENCE_WEIGHT[a.category] ||
-      Number(Boolean(b.condition)) - Number(Boolean(a.condition)) ||
-      a.line - b.line,
-  );
-}
 
 function reverseVerb(category: Effect['category']): { verb: string; participle: string } {
   switch (category) {

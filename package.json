@@ -20,6 +20,7 @@
     "eval": "tsx packages/eval/src/evaluate.ts",
     "eval:live": "ANALYZER=llm tsx packages/eval/src/evaluate.ts",
     "eval:compare": "tsx packages/eval/src/compare.ts",
+    "eval:facts": "tsx packages/eval/src/factsExperiment.ts",
     "db:generate": "pnpm --filter @uc/db generate",
     "start": "pnpm --parallel --filter @uc/api --filter @uc/web start",
     "trace": "tsx packages/eval/src/trace.ts"

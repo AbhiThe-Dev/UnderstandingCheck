@@ -4,6 +4,7 @@ import {
   SessionEngine,
   TieredAnalyzer,
   effortFrom,
+  promptOptionsFrom,
   parseTranscript,
   DEFAULT_CONFIG,
   type Analyzer,
@@ -49,7 +50,13 @@ export function analyzerFromEnv(sessionId: string, usage: UsageSink, config: Eng
   if (mode === 'llm' || mode === 'tiered') {
     const provider = createLlmProviderFromEnv();
     if (!provider) throw new Error(`ANALYZER=${mode} requires OPENAI_API_KEY`);
-    const llm = new LlmAnalyzer({ provider, sessionId, usage, limits: { ...config.llm, effort: effortFrom(process.env.UC_LLM_EFFORT_JSON, config.llm.effort) } });
+    const llm = new LlmAnalyzer({
+      provider,
+      sessionId,
+      usage,
+      limits: { ...config.llm, effort: effortFrom(process.env.UC_LLM_EFFORT_JSON, config.llm.effort) },
+      ...promptOptionsFrom(process.env),
+    });
     // UC_TIERED_RULES=off: rules still pace the screen, but only the AI layers can raise anything.
     return mode === 'tiered' ? new TieredAnalyzer(llm, { ruleCandidates: process.env.UC_TIERED_RULES !== 'off' }) : llm;
   }

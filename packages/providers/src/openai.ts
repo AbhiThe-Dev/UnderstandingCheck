@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
-import type { LlmProvider, LlmRequest, LlmResult, ModelTier } from '@uc/core';
+import { LlmOutputError, type LlmProvider, type LlmRequest, type LlmResult, type ModelTier } from '@uc/core';
 
 export interface OpenAiProviderOptions {
   apiKey: string;
@@ -38,7 +38,8 @@ export class OpenAiProvider implements LlmProvider {
         ],
         response_format: {
           type: 'json_schema',
-          json_schema: { name: req.schemaName, schema: z.toJSONSchema(req.schema) as Record<string, unknown>, strict: false },
+          // Input shape: what the model writes, before trimming transforms run.
+          json_schema: { name: req.schemaName, schema: z.toJSONSchema(req.schema, { io: 'input' }) as Record<string, unknown>, strict: false },
         },
         max_completion_tokens: req.maxOutputTokens,
         ...(withEffort && req.effort ? { reasoning_effort: req.effort } : {}),
@@ -54,23 +55,24 @@ export class OpenAiProvider implements LlmProvider {
       this.noEffort.add(model);
       res = await create(false);
     }
+    const usage = {
+      model,
+      inputTokens: res.usage?.prompt_tokens ?? 0,
+      outputTokens: res.usage?.completion_tokens ?? 0,
+      cachedInputTokens: res.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      reasoningTokens: res.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
+    };
+    const finish = res.choices[0]?.finish_reason ?? undefined;
     const content = res.choices[0]?.message?.content ?? '';
     let json: unknown;
     try {
       json = JSON.parse(content);
     } catch {
-      throw new Error(`Model returned non-JSON output for ${req.operation}`);
+      // Usually the answer was cut off at max_completion_tokens (finish_reason "length").
+      throw new LlmOutputError(`Model returned non-JSON output for ${req.operation} (finish: ${finish})`, usage, finish);
     }
     const parsed = req.schema.safeParse(json);
-    if (!parsed.success) throw new Error(`Model output failed validation for ${req.operation}: ${parsed.error.message.slice(0, 300)}`);
-    return {
-      data: parsed.data,
-      usage: {
-        model,
-        inputTokens: res.usage?.prompt_tokens ?? 0,
-        outputTokens: res.usage?.completion_tokens ?? 0,
-        cachedInputTokens: res.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-      },
-    };
+    if (!parsed.success) throw new LlmOutputError(`Model output failed validation for ${req.operation}: ${parsed.error.message.slice(0, 300)}`, usage, finish);
+    return { data: parsed.data, usage };
   }
 }

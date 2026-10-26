@@ -365,6 +365,8 @@ export const EngineMetrics = z.object({
   screens: z.number().int().optional(),
   screenFlags: z.number().int().optional(),
   deepCalls: z.number().int().optional(),
+  /** Fact-sheet facts the model said the transcript or code contradicts (rule mistakes to fix). */
+  factsDisputed: z.number().int().optional(),
 });
 export type EngineMetrics = z.infer<typeof EngineMetrics>;
 
@@ -449,4 +451,5 @@ export type EngineEvent =
   | { type: 'budget_exhausted'; spentUsd: number; limitUsd: number }
   | { type: 'screen_observed'; evidenceIds: string[]; files: string[] }
   | { type: 'slack_observed'; refIds: string[] }
-  | { type: 'screened'; segments: number; flags: number };
+  | { type: 'screened'; segments: number; flags: number }
+  | { type: 'fact_disputed'; factId: string; fact: string; reason: string };

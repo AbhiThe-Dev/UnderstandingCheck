@@ -3,6 +3,7 @@ import { CONSEQUENCE_WEIGHT, describeEffect } from './lexicon';
 import type { Analyzer, ClarificationPurpose, RawCandidate, SegmentAnalysis, SlackContextItem, SymbolSearch, UsageSink } from './ports';
 import { decide, hasLiveCapacity, scoreDiscrepancy } from './prioritizer';
 import { RetrievalCache, retrieveContext, toEvidence } from './retrieval';
+import { buildFactSheet } from './facts';
 import { slackPointer } from './slack';
 import { contentTerms, leadingYesNo } from './text';
 import { addPosition, consensus, firmPositions, isOpen, isPriorRecord, needsIndependentAnswer, setStatus } from './tracker';
@@ -267,7 +268,8 @@ export class SessionEngine {
     const candidateEvidence = focusEv && !evidence.some((e) => e.id === focusEv.id) ? [...evidence, focusEv] : evidence;
 
     const slack = this.slackContext(analysis);
-    const raw = await this.deps.analyzer.generateCandidates({ ctx, analysis, claim, evidence: candidateEvidence, slack });
+    const facts = buildFactSheet({ state: this.state, segments: this.segments, evidence: candidateEvidence, slack, recentWindow: this.cfg.recentWindow });
+    const raw = await this.deps.analyzer.generateCandidates({ ctx, analysis, claim, evidence: candidateEvidence, slack, facts, reportDispute: this.disputeSink(events) });
     const touched: Discrepancy[] = [];
     for (const c of raw) {
       const d = await this.acceptCandidate(c, segment, events, slack);
@@ -582,11 +584,20 @@ export class SessionEngine {
       const claim = this.state.claims.find((c) => c.segmentId === last.id);
       if (!claim) continue;
       this.state.metrics.deepCalls = (this.state.metrics.deepCalls ?? 0) + 1;
-      const raw = await a.deepCandidates({ ctx, analysis, claim, evidence, slack, hint: f.concern });
+      const facts = buildFactSheet({ state: this.state, segments: this.segments.slice(0, last.index + 1), evidence, slack, recentWindow: this.cfg.recentWindow });
+      const raw = await a.deepCandidates({ ctx, analysis, claim, evidence, slack, hint: f.concern, facts, reportDispute: this.disputeSink(events) });
       for (const c of raw) await this.acceptCandidate(c, last, events, slack);
     }
     await this.settle(this.segments.length - 1, events);
     return events;
+  }
+
+  /** Records facts the model disputed, so rule mistakes are visible (events and a metric). */
+  private disputeSink(events: EngineEvent[]) {
+    return (d: { factId: string; fact: string; reason: string }) => {
+      this.state.metrics.factsDisputed = (this.state.metrics.factsDisputed ?? 0) + 1;
+      events.push({ type: 'fact_disputed', ...d });
+    };
   }
 
   /** Whether `screenIfDue` would screen now (cheap; lets callers skip scheduling a no-op). */

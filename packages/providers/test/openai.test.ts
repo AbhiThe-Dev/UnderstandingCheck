@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
+import { LlmOutputError } from '@uc/core';
 import { OpenAiProvider } from '../src';
 
 const req = { operation: 'screen', tier: 'cheap' as const, system: 's', user: 'u', schema: z.object({ ok: z.boolean() }), schemaName: 'x', maxOutputTokens: 100 };
-const reply = { choices: [{ message: { content: '{"ok":true}' } }], usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 768 } } };
+const reply = { choices: [{ message: { content: '{"ok":true}' } }], usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 768 }, completion_tokens_details: { reasoning_tokens: 32 } } };
 
 function stub(fail?: (params: any) => Error | null) {
   const sent: any[] = [];
@@ -23,12 +24,12 @@ function stub(fail?: (params: any) => Error | null) {
 }
 
 describe('OpenAiProvider', () => {
-  it('sends reasoning effort and the cache key, and reports cached input tokens', async () => {
+  it('sends reasoning effort and the cache key, and reports cached and reasoning tokens', async () => {
     const { client, sent } = stub();
     const p = new OpenAiProvider({ apiKey: 'k', client });
     const r = await p.complete({ ...req, effort: 'minimal', cacheKey: 'session-1' });
     expect(sent[0]).toMatchObject({ model: 'gpt-5-mini', reasoning_effort: 'minimal', prompt_cache_key: 'session-1', max_completion_tokens: 100 });
-    expect(r.usage).toEqual({ model: 'gpt-5-mini', inputTokens: 1000, outputTokens: 50, cachedInputTokens: 768 });
+    expect(r.usage).toEqual({ model: 'gpt-5-mini', inputTokens: 1000, outputTokens: 50, cachedInputTokens: 768, reasoningTokens: 32 });
   });
 
   it('omits effort when not asked for', async () => {
@@ -49,5 +50,15 @@ describe('OpenAiProvider', () => {
   it('does not swallow unrelated errors', async () => {
     const { client } = stub(() => new Error('429 rate limited'));
     await expect(new OpenAiProvider({ apiKey: 'k', client }).complete({ ...req, effort: 'low' })).rejects.toThrow('429');
+  });
+});
+
+describe('OpenAiProvider unusable answers', () => {
+  it('reports usage and the finish reason when the answer was cut off', async () => {
+    const client = { chat: { completions: { create: (async () => ({ choices: [{ message: { content: '{"ok": tr' }, finish_reason: 'length' }], usage: { prompt_tokens: 900, completion_tokens: 2000 } })) as any } } };
+    const err = await new OpenAiProvider({ apiKey: 'k', client }).complete(req).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmOutputError);
+    expect(err.finishReason).toBe('length');
+    expect(err.usage).toMatchObject({ inputTokens: 900, outputTokens: 2000 });
   });
 });

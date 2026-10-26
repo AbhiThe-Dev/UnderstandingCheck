@@ -54,6 +54,8 @@ export interface EngineConfig {
   llm: {
     /** Reasoning tokens count against these caps, so they leave room beyond the visible answer. */
     maxOutputTokens: Record<LlmOperation, number>;
+    /** The fact-sheet answer writes out its reading of the conversation before the candidates, so it needs more room. */
+    factSheetOutputTokens: number;
     maxInputChars: number;
     effort: Record<LlmOperation, ReasoningEffort>;
   };
@@ -90,6 +92,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   budget: { workspaceLimitUsd: 5 },
   llm: {
     maxOutputTokens: { extraction: 400, candidates: 2000, screen: 600, clarification: 800, response: 300 },
+    factSheetOutputTokens: 5000,
     maxInputChars: 24_000,
     // Spotting a conflict in cited code needs little reasoning; screening and classifying need almost none.
     effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal' },
@@ -172,6 +175,14 @@ export function estimateCostUsd(
   if (!p) return 0;
   const cached = Math.min(cachedInputTokens, inputTokens);
   return ((inputTokens - cached) * p.inputPerMTok + cached * (p.cachedInputPerMTok ?? p.inputPerMTok) + outputTokens * p.outputPerMTok) / 1_000_000;
+}
+
+/** Fact-sheet prompt and candidate model tier from `UC_PROMPT_STYLE` (raw | facts) and `UC_CANDIDATES_TIER` (cheap | reasoning). */
+export function promptOptionsFrom(env: Record<string, string | undefined>): { promptStyle: 'raw' | 'facts'; candidatesTier?: 'cheap' | 'reasoning' } {
+  return {
+    promptStyle: env.UC_PROMPT_STYLE === 'facts' ? 'facts' : 'raw',
+    ...(env.UC_CANDIDATES_TIER === 'cheap' || env.UC_CANDIDATES_TIER === 'reasoning' ? { candidatesTier: env.UC_CANDIDATES_TIER } : {}),
+  };
 }
 
 /** Merge `UC_LLM_EFFORT_JSON` (e.g. `{"candidates":"medium"}`) over the default reasoning effort per operation. */

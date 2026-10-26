@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, HeuristicAnalyzer, LlmAnalyzer, SessionEngine, parseTranscript } from '@uc/core';
+import { DEFAULT_CONFIG, HeuristicAnalyzer, LlmAnalyzer, LlmOutputError, SessionEngine, parseTranscript } from '@uc/core';
 import { ScriptedLlmProvider } from '@uc/providers';
 import { describe, expect, it } from 'vitest';
 import { MemoryUsage, loadSampleRepo } from '../src/runner';
@@ -117,5 +117,38 @@ describe('clarification drafting with real-model output shapes', () => {
     const draft = await analyzer.draftClarification(d, 'private_check', engine.state, null);
     expect(draft.format).toBe('scenario');
     expect(draft.question).toMatch(/^When a reviewer clicks Undo/);
+  });
+});
+
+describe('model answers that break limits or fail', () => {
+  it('trims an overlong answer instead of throwing it away', async () => {
+    const long = 'x'.repeat(400);
+    const { engine } = await run([[], [], [candidate({ title: long, quotes: [{ segmentId: 's2', quote: 'set the status back to pending' }, { segmentId: 's3', quote: 'Sounds good' }] })]]);
+    const d = engine.state.discrepancies[0]!;
+    expect(d.title).toHaveLength(140);
+  });
+
+  it('records a billed but unusable answer as failed usage', async () => {
+    const repo = await loadSampleRepo('approvals');
+    const usage = new MemoryUsage();
+    const provider = {
+      name: 'broken',
+      complete: async () => {
+        throw new LlmOutputError('Model returned non-JSON output for candidates (finish: length)', { model: 'gpt-5', inputTokens: 1000, outputTokens: 2000 }, 'length');
+      },
+    };
+    const analyzer = new LlmAnalyzer({ provider, sessionId: 't', usage, limits: DEFAULT_CONFIG.llm });
+    const { engine } = await SessionEngine.create({ sessionId: 't' }, { analyzer, search: repo.search, usage });
+    for (const s of parseTranscript(TRANSCRIPT)) await engine.ingest(s);
+    const failed = usage.records.filter((r) => r.failed);
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed.every((r) => r.estimatedCostUsd > 0)).toBe(true);
+  });
+});
+
+describe('unlisted consequence values', () => {
+  it('keeps the answer and treats the consequence as a business rule', async () => {
+    const { engine } = await run([[], [], [candidate({ consequence: 'access_control', quotes: [{ segmentId: 's2', quote: 'set the status back to pending' }, { segmentId: 's3', quote: 'Sounds good' }] })]]);
+    expect(engine.state.discrepancies[0]?.impact.consequence).toBe('business_rule');
   });
 });

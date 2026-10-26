@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { FactSheet } from './facts';
 import type {
   Claim,
   ClaimKind,
@@ -62,6 +63,8 @@ export interface LlmUsage {
   outputTokens: number;
   /** Part of `inputTokens` served from the provider's prompt cache (billed at a discount). */
   cachedInputTokens?: number;
+  /** Part of `outputTokens` spent on hidden reasoning. */
+  reasoningTokens?: number;
 }
 
 export interface LlmResult<T> {
@@ -74,6 +77,17 @@ export interface LlmProvider {
   complete<T>(req: LlmRequest<T>): Promise<LlmResult<T>>;
 }
 
+/** The model answered (and was billed) but the answer was unusable: cut off, not JSON, or off-schema. */
+export class LlmOutputError extends Error {
+  constructor(
+    message: string,
+    readonly usage: LlmUsage,
+    readonly finishReason?: string,
+  ) {
+    super(message);
+  }
+}
+
 // ---------- Usage / cost ----------
 
 export interface UsageRecord {
@@ -83,7 +97,10 @@ export interface UsageRecord {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens?: number;
+  reasoningTokens?: number;
   estimatedCostUsd: number;
+  /** The call was billed but its answer was unusable. */
+  failed?: boolean;
 }
 
 export interface UsageSink {
@@ -142,6 +159,10 @@ export interface CandidateInput {
   slack?: SlackContextItem[];
   /** Why a screening pass flagged this stretch (tiered analyzer); the call is made even if nothing else looks interesting. */
   hint?: string;
+  /** Facts computed by code for the model to check and interpret (fact-sheet prompt style). */
+  facts?: FactSheet;
+  /** Called when the model disputes a fact; the engine logs it so the rules can be improved. */
+  reportDispute?: (d: { factId: string; fact: string; reason: string }) => void;
 }
 
 /** A stretch of conversation for the tiered analyzer's cheap screen. */

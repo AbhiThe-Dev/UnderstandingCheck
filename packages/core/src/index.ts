@@ -10,6 +10,8 @@ export * from './prioritizer';
 export * from './tracker';
 export * from './engine';
 export * from './slack';
+export * from './facts';
+export * from './signals';
 export * from './summary';
 export * from './transcript';
 export * from './metrics';

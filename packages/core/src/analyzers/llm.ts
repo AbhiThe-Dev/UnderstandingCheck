@@ -1,3 +1,4 @@
+import type { z } from 'zod';
 import { DEFAULT_CONFIG, estimateCostUsd, type EngineConfig, type LlmOperation, type ModelPrice } from '../config';
 import type {
   AnalysisContext,
@@ -7,6 +8,8 @@ import type {
   ClarificationPurpose,
   LlmProvider,
   LlmRequest,
+  LlmUsage,
+  ModelTier,
   RawCandidate,
   ResponseInterpretation,
   ScreenFlag,
@@ -15,6 +18,8 @@ import type {
   UsageSink,
 } from '../ports';
 import type { Clarification, Discrepancy, Position, SessionState } from '../types';
+import { renderFactSheet, type FactSheet } from '../facts';
+import { LlmOutputError } from '../ports';
 import { contentTerms } from '../text';
 import { analyzeSegmentHeuristic } from '../understanding';
 import { interpretResponseHeuristic } from './heuristic';
@@ -26,6 +31,7 @@ import {
   ResponseSchema,
   SYSTEM_BASE,
   renderDiscrepancy,
+  FactCandidateSchema,
   renderEvidence,
   renderScreen,
   renderSlack,
@@ -39,6 +45,10 @@ export interface LlmAnalyzerOptions {
   usage?: UsageSink;
   limits: EngineConfig['llm'];
   prices?: Record<string, ModelPrice>;
+  /** raw: the model works everything out from code and transcript. facts: code supplies a checked fact sheet too. */
+  promptStyle?: 'raw' | 'facts';
+  /** Model tier for candidate generation (default: reasoning). */
+  candidatesTier?: ModelTier;
 }
 
 /**
@@ -54,18 +64,30 @@ export class LlmAnalyzer implements Analyzer {
   private async call<T>(req: LlmRequest<T>): Promise<T> {
     const user = req.user.length > this.opts.limits.maxInputChars ? req.user.slice(-this.opts.limits.maxInputChars) : req.user;
     const effort = req.effort ?? this.opts.limits.effort?.[req.operation as LlmOperation];
-    // One cache key per session: its calls share a system prompt and, often, the same code evidence.
-    const res = await this.opts.provider.complete({ ...req, user, effort, cacheKey: req.cacheKey ?? this.opts.sessionId });
-    const cached = res.usage.cachedInputTokens ?? 0;
-    await this.opts.usage?.record({
-      sessionId: this.opts.sessionId,
-      model: res.usage.model,
-      operation: req.operation,
-      inputTokens: res.usage.inputTokens,
-      outputTokens: res.usage.outputTokens,
-      cachedInputTokens: cached,
-      estimatedCostUsd: estimateCostUsd(res.usage.model, res.usage.inputTokens, res.usage.outputTokens, this.opts.prices, cached),
-    });
+    const record = (u: LlmUsage, failed: boolean) => {
+      const cached = u.cachedInputTokens ?? 0;
+      return this.opts.usage?.record({
+        sessionId: this.opts.sessionId,
+        model: u.model,
+        operation: req.operation,
+        inputTokens: u.inputTokens,
+        outputTokens: u.outputTokens,
+        cachedInputTokens: cached,
+        reasoningTokens: u.reasoningTokens,
+        estimatedCostUsd: estimateCostUsd(u.model, u.inputTokens, u.outputTokens, this.opts.prices, cached),
+        ...(failed ? { failed: true } : {}),
+      });
+    };
+    let res;
+    try {
+      // One cache key per session: its calls share a system prompt and, often, the same code evidence.
+      res = await this.opts.provider.complete({ ...req, user, effort, cacheKey: req.cacheKey ?? this.opts.sessionId });
+    } catch (err) {
+      // An unusable answer is still billed: record it so cost and failure rates stay honest.
+      if (err instanceof LlmOutputError) await record(err.usage, true);
+      throw err;
+    }
+    await record(res.usage, false);
     return res.data;
   }
 
@@ -113,35 +135,50 @@ export class LlmAnalyzer implements Analyzer {
     }
   }
 
-  async generateCandidates({ ctx, analysis, evidence, slack = [], hint }: CandidateInput): Promise<RawCandidate[]> {
+  async generateCandidates({ ctx, analysis, evidence, slack = [], hint, facts, reportDispute }: CandidateInput): Promise<RawCandidate[]> {
     // Slack only arrives when it shares terms with this segment (the engine filters it), so it can justify a call.
     const interesting =
       !!hint || evidence.length > 0 || slack.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
     if (!interesting) return [];
-    let out;
+    const sheet = this.opts.promptStyle === 'facts' ? facts : undefined;
+    // Least-changing first (code, then Slack, then the conversation, then the facts) so consecutive calls share a cacheable prefix.
+    const user = `Retrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
+      slack.length > 0 ? `\n\nSlack messages (earlier discussion):\n${renderSlack(slack, DEFAULT_CONFIG.retrieval.slackBudgetTokens * 4)}` : ''
+    }\n\n${renderState(ctx.state)}${
+      sheet ? `\n\nFact sheet (machine-extracted; check before relying on it):\n${renderFactSheet(sheet)}` : ''
+    }\n\nNewest segment id: ${ctx.segment.id}${hint ? `\nA screening pass flagged this stretch: ${hint}` : ''}`;
+    const base = { operation: 'candidates', tier: this.opts.candidatesTier ?? ('reasoning' as const), user, maxOutputTokens: this.opts.limits.maxOutputTokens.candidates };
+    let candidates: (z.infer<typeof CandidateSchema>['candidates'][number] & { factIds?: string[] })[];
     try {
-      out = await this.call({
-        operation: 'candidates',
-        tier: 'reasoning',
-        system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`,
-        // Least-changing first (code, then Slack, then the conversation) so consecutive calls share a cacheable prefix.
-        user: `Retrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
-          slack.length > 0 ? `\n\nSlack messages (earlier discussion):\n${renderSlack(slack, DEFAULT_CONFIG.retrieval.slackBudgetTokens * 4)}` : ''
-        }\n\n${renderState(ctx.state)}\n\nNewest segment id: ${ctx.segment.id}${hint ? `\nA screening pass flagged this stretch: ${hint}` : ''}`,
-        schema: CandidateSchema,
-        schemaName: 'discrepancy_candidates',
-        maxOutputTokens: this.opts.limits.maxOutputTokens.candidates,
-      });
+      if (sheet) {
+        const out = await this.call({
+          ...base,
+          system: `${SYSTEM_BASE}\n\n${PROMPTS.candidatesFacts}`,
+          schema: FactCandidateSchema,
+          schemaName: 'fact_checked_candidates',
+          maxOutputTokens: this.opts.limits.factSheetOutputTokens ?? DEFAULT_CONFIG.llm.factSheetOutputTokens,
+        });
+        for (const fc of out.factChecks) {
+          if (fc.status !== 'disputed') continue;
+          const fact = factText(sheet, fc.factId);
+          if (fact) reportDispute?.({ factId: fc.factId, fact, reason: fc.reason });
+        }
+        candidates = out.candidates;
+      } else {
+        candidates = (await this.call({ ...base, system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`, schema: CandidateSchema, schemaName: 'discrepancy_candidates' })).candidates;
+      }
     } catch {
       return [];
     }
-    return out.candidates.map((c) => ({
+    return candidates.map((c) => ({
       key: c.key,
       category: c.category,
       title: c.title,
       description: c.description,
       quotes: c.quotes,
-      codeRefs: c.codeRefs,
+      codeRefs: [...c.codeRefs, ...(sheet ? factRefs(sheet, c.factIds ?? []) : [])].filter(
+        (r, i, all) => all.findIndex((x) => x.evidenceId === r.evidenceId && x.startLine === r.startLine) === i,
+      ),
       slackRefs: c.slackRefs,
       interpretations: c.interpretations.map((i) => ({ ...i, keywords: [] })),
       consequence: c.consequence,
@@ -219,4 +256,21 @@ export class LlmAnalyzer implements Analyzer {
       return cheap;
     }
   }
+}
+
+/** Code citations for effect facts the model relied on: the exact line the fact names. */
+function factRefs(sheet: FactSheet, ids: string[]): RawCandidate['codeRefs'] {
+  return ids.flatMap((id) => {
+    const f = sheet.effects.find((e) => e.id === id);
+    return f ? [{ evidenceId: f.evidenceId, startLine: f.line, endLine: f.line, note: `${f.symbolName}: ${f.code}` }] : [];
+  });
+}
+
+function factText(sheet: FactSheet, id: string): string | null {
+  const e = sheet.effects.find((f) => f.id === id);
+  if (e) return `${e.filePath}:${e.line} ${e.code}; matching turns: ${e.matchingTurns.map((m) => m.segmentId).join(', ') || 'none'}`;
+  const a = sheet.agreements.find((f) => f.id === id);
+  if (a) return `${a.segmentId} ${a.speaker} agreed to ${a.agreedTo?.segmentId ?? 'nothing found'}`;
+  const p = sheet.statements.find((f) => f.id === id) ?? sheet.priors.find((f) => f.id === id);
+  return p ? JSON.stringify(p) : null;
 }
