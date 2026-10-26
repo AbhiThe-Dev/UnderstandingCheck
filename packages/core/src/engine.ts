@@ -796,8 +796,9 @@ export class SessionEngine {
     for (const d of this.state.discrepancies) {
       if (!isOpen(d) || d.visibility !== 'hidden') continue;
       if ((d.surfaceAfterSegmentIndex ?? 0) > at) continue;
-      // Someone already took an explicit position: the team is discussing it, so let them finish.
-      if (d.status === 'potential' && firmPositions(d).size > 0) continue;
+      // Someone already took an explicit position: the team is discussing it, so let them finish
+      // (for at most `discussionHoldSegments` turns after it was last mentioned).
+      if (d.status === 'potential' && firmPositions(d).size > 0 && at - d.lastLinkedSegmentIndex <= this.cfg.discussionHoldSegments) continue;
       this.rescore(d, at);
       if (d.decision === 'surface') await this.surface(d, at, events);
     }

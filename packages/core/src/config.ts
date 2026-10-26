@@ -19,6 +19,11 @@ export interface EngineConfig {
     suppressThreshold: number;
     ambiguousSpeakerPenalty: number;
   };
+  /**
+   * When someone has already stated a position on a concern, hold it back while the team discusses
+   * it, for at most this many turns after it was last mentioned. Unlimited by default.
+   */
+  discussionHoldSegments: number;
   /** Segments to wait before surfacing, so later turns can resolve or sharpen a candidate. */
   settleWindow: Record<DiscrepancyCategory, number>;
   rateLimit: {
@@ -77,6 +82,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
     suppressThreshold: 0.35,
     ambiguousSpeakerPenalty: 0.7,
   },
+  discussionHoldSegments: Number.POSITIVE_INFINITY,
   settleWindow: {
     false_alignment: 0,
     direct_disagreement: 0,
@@ -91,13 +97,33 @@ export const DEFAULT_CONFIG: EngineConfig = {
   recentWindow: 12,
   budget: { workspaceLimitUsd: 5 },
   llm: {
-    maxOutputTokens: { extraction: 400, candidates: 2000, screen: 600, clarification: 800, response: 300 },
+    // Candidates were cut off at 2000 (15% of answers in a live run): hidden reasoning uses ~1000 of it.
+    maxOutputTokens: { extraction: 400, candidates: 4000, screen: 600, clarification: 800, response: 300 },
     factSheetOutputTokens: 5000,
     maxInputChars: 24_000,
     // Spotting a conflict in cited code needs little reasoning; screening and classifying need almost none.
     effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal' },
   },
 };
+
+/**
+ * Surfacing for the AI analyzers, tuned to miss less at the cost of more suggestions: lower score
+ * thresholds and more room in the panel. The rule-only analyzer keeps the defaults.
+ */
+export const RECALL_PROFILE: DeepPartial<EngineConfig> = {
+  scoring: { liveThreshold: 0.45, suppressThreshold: 0.25 },
+  rateLimit: { maxLivePerSession: 12, maxOpenLive: 5 },
+  // A concern someone took a position on but nobody settled must not stay hidden for the whole meeting.
+  discussionHoldSegments: 1,
+};
+
+/** Options the app and eval runner apply to the AI analyzers, from the environment. */
+export function aiAnalyzerEnv(env: Record<string, string | undefined>): { withRules: boolean; config: DeepPartial<EngineConfig> } {
+  return {
+    withRules: env.UC_LLM_WITH_RULES !== 'off',
+    config: env.UC_SURFACING === 'balanced' ? {} : RECALL_PROFILE,
+  };
+}
 
 export function mergeConfig(partial?: DeepPartial<EngineConfig>): EngineConfig {
   return deepMerge(DEFAULT_CONFIG, partial ?? {}) as EngineConfig;

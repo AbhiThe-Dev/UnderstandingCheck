@@ -4,6 +4,7 @@ import {
   LlmAnalyzer,
   SessionEngine,
   TieredAnalyzer,
+  aiAnalyzerEnv,
   effortFrom,
   pricesFrom,
   promptOptionsFrom,
@@ -224,6 +225,7 @@ export class Services {
         limits: llmLimits(),
         prices: pricesFrom(process.env.UC_MODEL_PRICES_JSON),
         ...promptOptionsFrom(process.env),
+        withRules: aiAnalyzerEnv(process.env).withRules,
       });
       return this.analyzerMode === 'tiered' ? new TieredAnalyzer(llm) : llm;
     }
@@ -238,7 +240,8 @@ export class Services {
       analyzer: this.analyzerFor(row.id),
       search,
       usage: this.store.usageSink(row.id),
-      config: { budget: { workspaceLimitUsd: ws.monthlyBudgetUsd } },
+      // The AI analyzers surface more readily (the user prefers false alarms to misses); rules-only keeps the defaults.
+      config: { ...(this.analyzerMode !== 'heuristic' && this.llm ? aiAnalyzerEnv(process.env).config : {}), budget: { workspaceLimitUsd: ws.monthlyBudgetUsd } },
     };
   }
 

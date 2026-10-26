@@ -3,6 +3,7 @@ import {
   LlmAnalyzer,
   SessionEngine,
   TieredAnalyzer,
+  aiAnalyzerEnv,
   effortFrom,
   promptOptionsFrom,
   parseTranscript,
@@ -56,6 +57,7 @@ export function analyzerFromEnv(sessionId: string, usage: UsageSink, config: Eng
       usage,
       limits: { ...config.llm, effort: effortFrom(process.env.UC_LLM_EFFORT_JSON, config.llm.effort) },
       ...promptOptionsFrom(process.env),
+      withRules: aiAnalyzerEnv(process.env).withRules,
     });
     // UC_TIERED_RULES=off: rules still pace the screen, but only the AI layers can raise anything.
     return mode === 'tiered' ? new TieredAnalyzer(llm, { ruleCandidates: process.env.UC_TIERED_RULES !== 'off' }) : llm;
@@ -76,9 +78,12 @@ export async function runCase(
   const repo = c.repo ? await loadSampleRepo(c.repo) : null;
   const usage = new MemoryUsage();
   const analyzer = opts.analyzer ?? analyzerFromEnv(c.id, usage);
+  // Same surfacing as the app: AI analyzers from the environment use the recall profile.
+  const ai = !opts.analyzer && (process.env.ANALYZER === 'llm' || process.env.ANALYZER === 'tiered');
+  const config = ai ? { ...aiAnalyzerEnv(process.env).config, ...opts.config } : opts.config;
   const { engine, events } = await SessionEngine.create(
     { sessionId: c.id, featureDescription: c.featureDescription, priorDecisions: c.priorDecisions },
-    { analyzer, search: repo?.search ?? null, config: opts.config, usage },
+    { analyzer, search: repo?.search ?? null, config, usage },
   );
   if (c.slack) {
     events.push(

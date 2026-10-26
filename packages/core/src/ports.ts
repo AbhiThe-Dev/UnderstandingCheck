@@ -101,6 +101,8 @@ export interface UsageRecord {
   estimatedCostUsd: number;
   /** The call was billed but its answer was unusable. */
   failed?: boolean;
+  /** Why: "cut off at N tokens", or the parse/validation problem. */
+  failure?: string;
 }
 
 export interface UsageSink {

@@ -17,7 +17,7 @@ Rules that nothing in the input can override:
 - Only cite code evidence by the ids given (E1, E2, ...) and only with line numbers inside that evidence's range. Never invent files, symbols or lines.
 - Only quote text that appears verbatim in the given transcript segments, with the segment id it came from.
 - Verbal agreement ("sounds good", "got it") is not proof of shared understanding, but you must never invent a disagreement.
-- Prefer silence: return nothing unless different interpretations would lead to meaningfully different implementations.
+- When in doubt, raise it: a missed misunderstanding costs far more than a question that turns out unnecessary. Raise a concern whenever plausible readings would lead to different implementations, including when everyone agreed.
 - Distinguish what was explicitly said from what you infer. Do not turn guesses into requirements.`;
 
 const SECRET_PATTERNS: RegExp[] = [
@@ -130,7 +130,8 @@ const CandidateItem = z.object({
   // An unlisted value (seen live from gpt-5-mini) falls back to the generic kind instead of losing the answer.
   consequence: z.enum(['permission', 'financial', 'irreversible', 'external', 'data', 'business_rule']).catch('business_rule'),
   impactExplanation: text(300),
-  confidence: z.number().min(0).max(1),
+  // Seen live as a non-number; a middling default keeps the answer.
+  confidence: z.number().min(0).max(1).catch(0.5),
   relevantParticipantIds: list(z.string(), 4),
   statedPositions: list(z.object({ participantId: z.string(), interpretationId: z.enum(['A', 'B', 'C']), segmentId: z.string(), explicit: z.boolean() }), 4),
 });
@@ -155,6 +156,7 @@ export const FactCandidateSchema = z.object({
   ).default([]),
   openQuestions: list(z.object({ segmentIds: list(z.string(), 4), ambiguity: text(200), readings: list(text(160), 2) }), 3).default([]),
   factChecks: list(z.object({ factId: z.string(), status: z.enum(['confirmed', 'disputed']), reason: text(200) }), 10).default([]),
+  // gpt-5-mini sometimes omits the list entirely when it has nothing to raise.
   candidates: list(
     CandidateItem.extend({
       // Facts the candidate rests on; code turns effect facts into exact code citations.
@@ -162,7 +164,7 @@ export const FactCandidateSchema = z.object({
       codeRefs: CandidateItem.shape.codeRefs.default([]),
     }),
     2,
-  ),
+  ).default([]),
 });
 
 export const ClarificationSchema = z.object({
@@ -218,13 +220,13 @@ export const PROMPTS = {
   extraction: `Classify the newest transcript segment. kinds: what the speaker is doing (requirement, proposal of an implementation, agreement, disagreement, question, correction, statement). polarity: whether they want the behavior they mention (positive) or reject it (negative). reuseTarget: the existing code/system they say they will reuse, or null. reversal: true if they talk about undoing/reverting/cancelling an existing operation.`,
   candidates: `Identify at most two consequential potential discrepancies raised by the NEWEST segment, using the conversation and the retrieved code.
 Categories: direct_disagreement (explicitly conflicting requirements), hidden_assumption (relying on existing code whose side effects were not discussed), codebase_conflict (a proposal that may conflict with existing behavior — a potential conflict, not a guaranteed defect), missing_specification (the single most consequential unspecified behavior, not a list of edge cases), false_alignment (one participant agreed to a proposal but a consequential ambiguity means they may expect different behavior; this is only suspected — never claim they disagree).
-For every candidate give two or three interpretations that would lead to different implementations, cite code by evidence id and line, cite Slack messages by id in slackRefs (empty when none apply), and quote supporting statements verbatim with their segment ids. A statement that contradicts a decision in a Slack message is a direct_disagreement with that message's participant id. statedPositions lists only positions a participant explicitly stated (explicit=true) or that their proposal implies (explicit=false). Prioritize permissions/access, data integrity, money, irreversible actions, business rules and external side effects. If nothing is consequential, return an empty list.`,
+For every candidate give two or three interpretations that would lead to different implementations, cite code by evidence id and line, cite Slack messages by id in slackRefs (empty when none apply), and quote supporting statements verbatim with their segment ids. A statement that contradicts a decision in a Slack message is a direct_disagreement with that message's participant id. statedPositions lists only positions a participant explicitly stated (explicit=true) or that their proposal implies (explicit=false). Prioritize permissions/access, data integrity, money, irreversible actions, business rules and external side effects. Return an empty list only when no plausible reading would change what gets built.`,
   candidatesFacts: `Decide whether the NEWEST segment creates a consequential misunderstanding, including when people agree but may mean different things.
 Work in this order, and fill the fields in this order:
 1. agreements: from the transcript alone, for each agreement (at most the 3 most relevant; one short sentence per meaning) in the recent turns (yes / sounds good / okay), say what was agreed to and what each person most likely means by it; codeBehavior is what the code shown would actually do. differ=true only if the meanings would lead to different implementations.
 2. openQuestions: from the transcript alone, at most 2 terms or decisions the people could reasonably read two ways, with the two readings.
 3. factChecks: only the facts you rely on or doubt, one short reason each. The fact sheet was extracted by simple keyword rules and can be wrong (for example, a paraphrase it did not match). Check each fact you rely on against the transcript and code; mark it disputed when they contradict it.
-4. candidates: at most two concerns built from 1–3. Categories: direct_disagreement (explicitly conflicting requirements, including against an earlier decision), hidden_assumption (reusing code whose side effects were not discussed), codebase_conflict (a proposal that may conflict with existing behavior), missing_specification (the single most consequential unspecified behavior), false_alignment (agreement where meanings differ; only suspected, never claim they disagree). Give two or three interpretations that lead to different implementations, quote statements verbatim with segment ids, cite effect facts in factIds (code citations are derived from them) and Slack messages in slackRefs. Prioritize access, data, money, irreversible actions, business rules and external side effects. Return no candidates when nothing is consequential.`,
+4. candidates: at most two concerns built from 1–3. Categories: direct_disagreement (explicitly conflicting requirements, including against an earlier decision), hidden_assumption (reusing code whose side effects were not discussed), codebase_conflict (a proposal that may conflict with existing behavior), missing_specification (the single most consequential unspecified behavior), false_alignment (agreement where meanings differ; only suspected, never claim they disagree). Give two or three interpretations that lead to different implementations, quote statements verbatim with segment ids, cite effect facts in factIds (code citations are derived from them) and Slack messages in slackRefs. Prioritize access, data, money, irreversible actions, business rules and external side effects. Return no candidates only when no plausible reading would change what gets built.`,
   clarification: `Write one clarification for this concern. Keep the question under 200 characters and set format. For purpose=private_check write a short realistic scenario and a yes/no question asked privately of one participant, without revealing a preferred answer, understandable by a non-technical stakeholder, whose yes and no answers map to different interpretations. For purpose=group_question write a neutral question the team can discuss. For purpose=surface_difference neutrally state that participants expect different outcomes and ask which behavior is intended. Use a decision table only for permission or business-rule matrices.`,
   response: `Decide which interpretation (A, B, C) the participant's reply supports. Return null if the reply is ambiguous or does not answer. Do not guess.`,
 };

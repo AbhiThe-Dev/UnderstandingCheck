@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, HeuristicAnalyzer, LlmAnalyzer, LlmOutputError, SessionEngine, parseTranscript } from '@uc/core';
+import { DEFAULT_CONFIG, HeuristicAnalyzer, LlmAnalyzer, LlmOutputError, RECALL_PROFILE, SessionEngine, aiAnalyzerEnv, parseTranscript } from '@uc/core';
 import { ScriptedLlmProvider } from '@uc/providers';
 import { describe, expect, it } from 'vitest';
 import { MemoryUsage, loadSampleRepo } from '../src/runner';
@@ -150,5 +150,89 @@ describe('unlisted consequence values', () => {
   it('keeps the answer and treats the consequence as a business rule', async () => {
     const { engine } = await run([[], [], [candidate({ consequence: 'access_control', quotes: [{ segmentId: 's2', quote: 'set the status back to pending' }, { segmentId: 's3', quote: 'Sounds good' }] })]]);
     expect(engine.state.discrepancies[0]?.impact.consequence).toBe('business_rule');
+  });
+});
+
+describe('rules and AI together (withRules)', () => {
+  async function withRules(candidates: unknown) {
+    const repo = await loadSampleRepo('approvals');
+    const provider = new ScriptedLlmProvider({
+      extraction: { kinds: ['statement'], polarity: 'neutral', reuseTarget: null, reversal: false },
+      candidates: () => candidates,
+      clarification: { question: 'Should undo also remove portal access?', scenario: null, yesMeans: 'B', noMeans: 'A', decisionTable: null },
+      response: { interpretationId: null, confidence: 0, reason: 'unclear' },
+    });
+    const analyzer = new LlmAnalyzer({ provider, sessionId: 't', limits: DEFAULT_CONFIG.llm, withRules: true });
+    const { engine } = await SessionEngine.create({ sessionId: 't' }, { analyzer, search: repo.search });
+    for (const s of parseTranscript(TRANSCRIPT)) await engine.ingest(s);
+    return { engine, provider };
+  }
+
+  it('keeps the rule finding when the model raises nothing, and tells the model what the rules flagged', async () => {
+    const { engine, provider } = await withRules({ candidates: [] });
+    const rule = engine.state.discrepancies.find((d) => d.category === 'false_alignment');
+    expect(rule).toBeDefined();
+    expect(provider.calls.some((c) => c.operation === 'candidates' && c.user.includes(`Already flagged by rules for this segment`) && c.user.includes(rule!.key))).toBe(true);
+  });
+
+  it('does not raise the same concern twice when the model reuses the rule key', async () => {
+    // Learn the rule key first, then have the model describe the same concern under it.
+    const { engine: probe } = await withRules({ candidates: [] });
+    const key = probe.state.discrepancies.find((d) => d.category === 'false_alignment')!.key;
+    const { engine } = await withRules({ candidates: [candidate({ key, quotes: [{ segmentId: 's2', quote: 'set the status back to pending' }, { segmentId: 's3', quote: 'Sounds good' }] })] });
+    expect(engine.state.discrepancies.filter((d) => d.key === key)).toHaveLength(1);
+  });
+
+  it('AI analyzers surface more readily unless UC_SURFACING=balanced', () => {
+    expect(aiAnalyzerEnv({}).config).toBe(RECALL_PROFILE);
+    expect(aiAnalyzerEnv({}).withRules).toBe(true);
+    expect(aiAnalyzerEnv({ UC_SURFACING: 'balanced', UC_LLM_WITH_RULES: 'off' })).toEqual({ withRules: false, config: {} });
+    expect(RECALL_PROFILE.scoring!.liveThreshold!).toBeLessThan(DEFAULT_CONFIG.scoring.liveThreshold);
+  });
+});
+
+describe('a concern someone took a position on but nobody settled', () => {
+  async function runWith(config: Parameters<typeof SessionEngine.create>[1]['config']) {
+    const repo = await loadSampleRepo('approvals');
+    const provider = new ScriptedLlmProvider({
+      extraction: { kinds: ['requirement'], polarity: 'positive', reuseTarget: null, reversal: true },
+      candidates: (req: { user: string }) => ({
+        candidates: req.user.includes('Newest segment id: s1')
+          ? [
+              candidate({
+                key: 'spec:undo-access',
+                category: 'missing_specification',
+                quotes: [{ segmentId: 's1', quote: 'undo an approval' }],
+                statedPositions: [{ participantId: 'p1', interpretationId: 'B', segmentId: 's1', explicit: true }],
+              }),
+            ]
+          : [],
+      }),
+      clarification: { question: 'Should undo also remove portal access?', scenario: null, yesMeans: 'B', noMeans: 'A', decisionTable: null },
+      response: { interpretationId: null, confidence: 0, reason: 'unclear' },
+    });
+    const analyzer = new LlmAnalyzer({ provider, sessionId: 't', limits: DEFAULT_CONFIG.llm });
+    const { engine } = await SessionEngine.create({ sessionId: 't' }, { analyzer, search: repo.search, config });
+    const turns = `Priya (PO): Admins need to be able to undo an approval.
+Sam (Developer): Let's look at the reporting dashboard next.
+Priya (PO): We should also export the weekly report as CSV.
+Sam (Developer): The CSV export should include the totals.
+Priya (PO): And the report should be emailed on Mondays.`;
+    for (const s of parseTranscript(turns)) await engine.ingest(s);
+    return engine.state.discrepancies.find((d) => d.key === 'spec:undo-access')!;
+  }
+
+  it('stays hidden by default (the team may still be discussing it)', async () => {
+    expect((await runWith({})).visibility).toBe('hidden');
+  });
+
+  it('surfaces with the recall settings once the conversation has moved on', async () => {
+    const d = await runWith(RECALL_PROFILE);
+    expect(d.visibility).toBe('live');
+  });
+
+  it('it is the hold that kept it hidden, not the score threshold', async () => {
+    const d = await runWith({ ...RECALL_PROFILE, discussionHoldSegments: Number.POSITIVE_INFINITY });
+    expect(d.visibility).toBe('hidden');
   });
 });

@@ -22,7 +22,7 @@ import { renderFactSheet, type FactSheet } from '../facts';
 import { LlmOutputError } from '../ports';
 import { contentTerms } from '../text';
 import { analyzeSegmentHeuristic } from '../understanding';
-import { interpretResponseHeuristic } from './heuristic';
+import { HeuristicAnalyzer, interpretResponseHeuristic } from './heuristic';
 import {
   CandidateSchema,
   ClarificationSchema,
@@ -49,6 +49,12 @@ export interface LlmAnalyzerOptions {
   promptStyle?: 'raw' | 'facts';
   /** Model tier for candidate generation (default: reasoning). */
   candidatesTier?: ModelTier;
+  /**
+   * Also keep the rule-based findings for each turn (free, instant). The model sees them as already
+   * flagged and reuses their key, so the two never raise the same concern twice. Off by default here;
+   * the app and eval runner turn it on.
+   */
+  withRules?: boolean;
 }
 
 /**
@@ -57,6 +63,7 @@ export interface LlmAnalyzerOptions {
  */
 export class LlmAnalyzer implements Analyzer {
   readonly name: string;
+  private rules = new HeuristicAnalyzer();
   constructor(private opts: LlmAnalyzerOptions) {
     this.name = `llm:${opts.provider.name}`;
   }
@@ -64,7 +71,7 @@ export class LlmAnalyzer implements Analyzer {
   private async call<T>(req: LlmRequest<T>): Promise<T> {
     const user = req.user.length > this.opts.limits.maxInputChars ? req.user.slice(-this.opts.limits.maxInputChars) : req.user;
     const effort = req.effort ?? this.opts.limits.effort?.[req.operation as LlmOperation];
-    const record = (u: LlmUsage, failed: boolean) => {
+    const record = (u: LlmUsage, failure: string | null) => {
       const cached = u.cachedInputTokens ?? 0;
       return this.opts.usage?.record({
         sessionId: this.opts.sessionId,
@@ -75,7 +82,7 @@ export class LlmAnalyzer implements Analyzer {
         cachedInputTokens: cached,
         reasoningTokens: u.reasoningTokens,
         estimatedCostUsd: estimateCostUsd(u.model, u.inputTokens, u.outputTokens, this.opts.prices, cached),
-        ...(failed ? { failed: true } : {}),
+        ...(failure ? { failed: true, failure } : {}),
       });
     };
     let res;
@@ -84,10 +91,12 @@ export class LlmAnalyzer implements Analyzer {
       res = await this.opts.provider.complete({ ...req, user, effort, cacheKey: req.cacheKey ?? this.opts.sessionId });
     } catch (err) {
       // An unusable answer is still billed: record it so cost and failure rates stay honest.
-      if (err instanceof LlmOutputError) await record(err.usage, true);
+      if (err instanceof LlmOutputError) {
+        await record(err.usage, err.finishReason === 'length' ? `cut off at ${req.maxOutputTokens} tokens` : err.message.replace(/^Model (returned|output) /, '').slice(0, 160));
+      }
       throw err;
     }
-    await record(res.usage, false);
+    await record(res.usage, null);
     return res.data;
   }
 
@@ -105,10 +114,12 @@ export class LlmAnalyzer implements Analyzer {
         schemaName: 'segment_extraction',
         maxOutputTokens: this.opts.limits.maxOutputTokens.extraction,
       });
+      // With rules alongside, keep every kind either side saw, so the rules still find their patterns.
+      const kinds = this.opts.withRules ? [...new Set([...base.kinds, ...out.kinds])].filter((k, _, all) => k !== 'statement' || all.length === 1) : out.kinds;
       return {
         ...base,
-        kinds: out.kinds,
-        polarity: out.polarity,
+        kinds,
+        polarity: this.opts.withRules && out.polarity === 'neutral' ? base.polarity : out.polarity,
         reuseTarget: out.reuseTarget ?? base.reuseTarget,
         reversalWord: out.reversal ? (base.reversalWord ?? 'undo') : base.reversalWord,
       };
@@ -135,18 +146,23 @@ export class LlmAnalyzer implements Analyzer {
     }
   }
 
-  async generateCandidates({ ctx, analysis, evidence, slack = [], hint, facts, reportDispute }: CandidateInput): Promise<RawCandidate[]> {
+  async generateCandidates(input: CandidateInput): Promise<RawCandidate[]> {
+    const { ctx, analysis, evidence, slack = [], hint, facts, reportDispute } = input;
+    const fromRules = this.opts.withRules ? await this.rules.generateCandidates(input) : [];
     // Slack only arrives when it shares terms with this segment (the engine filters it), so it can justify a call.
     const interesting =
       !!hint || evidence.length > 0 || slack.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
-    if (!interesting) return [];
+    if (!interesting) return fromRules;
+    const flagged = fromRules.length
+      ? `\n\nAlready flagged by rules for this segment (reuse the key if you describe the same concern; add only what they miss):\n${fromRules.map((c) => `- key=${c.key} [${c.category}] ${c.title}`).join('\n')}`
+      : '';
     const sheet = this.opts.promptStyle === 'facts' ? facts : undefined;
     // Least-changing first (code, then Slack, then the conversation, then the facts) so consecutive calls share a cacheable prefix.
     const user = `Retrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
       slack.length > 0 ? `\n\nSlack messages (earlier discussion):\n${renderSlack(slack, DEFAULT_CONFIG.retrieval.slackBudgetTokens * 4)}` : ''
     }\n\n${renderState(ctx.state)}${
       sheet ? `\n\nFact sheet (machine-extracted; check before relying on it):\n${renderFactSheet(sheet)}` : ''
-    }\n\nNewest segment id: ${ctx.segment.id}${hint ? `\nA screening pass flagged this stretch: ${hint}` : ''}`;
+    }${flagged}\n\nNewest segment id: ${ctx.segment.id}${hint ? `\nA screening pass flagged this stretch: ${hint}` : ''}`;
     const base = { operation: 'candidates', tier: this.opts.candidatesTier ?? ('reasoning' as const), user, maxOutputTokens: this.opts.limits.maxOutputTokens.candidates };
     let candidates: (z.infer<typeof CandidateSchema>['candidates'][number] & { factIds?: string[] })[];
     try {
@@ -168,9 +184,9 @@ export class LlmAnalyzer implements Analyzer {
         candidates = (await this.call({ ...base, system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`, schema: CandidateSchema, schemaName: 'discrepancy_candidates' })).candidates;
       }
     } catch {
-      return [];
+      return fromRules;
     }
-    return candidates.map((c) => ({
+    return [...fromRules, ...candidates.map((c) => ({
       key: c.key,
       category: c.category,
       title: c.title,
@@ -198,7 +214,7 @@ export class LlmAnalyzer implements Analyzer {
           }),
         ),
       meta: { kind: 'llm', linkTerms: contentTerms(`${c.title} ${c.interpretations.map((i) => i.label).join(' ')}`).join(' ') },
-    }));
+    }))];
   }
 
   async draftClarification(

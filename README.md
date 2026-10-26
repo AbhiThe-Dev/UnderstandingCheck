@@ -139,6 +139,9 @@ Endpoints: `GET /api/requirements`, `GET /api/requirements/:id`, `POST /api/requ
 | --- | --- | --- |
 | `ANALYZER` | `heuristic` | `llm`: the model on every meaningful turn (measured $1.35 per meeting hour). `tiered`: rules on every turn, a small-model screen each minute, the large model only on flagged stretches (about $0.01 per hour, but the screen misses most issues the rules do not catch; not recommended yet). Both need `OPENAI_API_KEY` |
 | `UC_LLM_EFFORT_JSON` | `{"candidates":"low","extraction":"minimal",...}` | Reasoning effort per model call; models that reject a level fall back to their default |
+| `UC_LLM_WITH_RULES` | on | `off` stops the AI analyzer from also keeping the rules' findings each turn (on: rules and AI together, so neither's catches are lost) |
+| `UC_SURFACING` | recall | AI analyzers show suggestions more readily (live threshold 0.45, up to 12 per meeting, discussion hold expires after a turn). `balanced` restores the rules-only settings |
+| `UC_PROMPT_STYLE`, `UC_CANDIDATES_TIER` | `raw`, `reasoning` | `facts` adds a code-computed fact sheet the model checks; `cheap` runs candidate analysis on the small model. Measured: about 70% cheaper, slightly more misses without rules |
 | `OPENAI_API_KEY` | — | **Not provided.** Required only for the model-backed analyzer |
 | `UC_MODEL_CHEAP` / `UC_MODEL_REASONING` | `gpt-5-mini` / `gpt-5` | Model names per tier — verify they are current for your account |
 | `UC_MODEL_PRICES_JSON` | built-in table | Override per-model prices used for cost estimates, e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}` |
