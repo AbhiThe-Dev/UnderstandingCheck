@@ -91,4 +91,12 @@ export class InMemorySymbolIndex implements SymbolSearch {
       .slice(0, limit)
       .map((d) => d.symbol);
   }
+
+  async callersOf(names: string[], limit: number): Promise<CodeSymbol[]> {
+    const set = new Set(names);
+    return this.docs
+      .filter((d) => !d.symbol.isTest && d.symbol.calls.some((c) => set.has(c)) && !set.has(d.symbol.symbolName))
+      .slice(0, limit)
+      .map((d) => d.symbol);
+  }
 }

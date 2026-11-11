@@ -73,6 +73,8 @@ function eventSummary(events: EngineEvent[]) {
           return { type: e.type, id: e.requirement.id };
         case 'preview_updated':
           return { type: e.type, id: e.preview.id, status: e.preview.status, note: e.note };
+        case 'decision_updated':
+          return { type: e.type, id: e.decision.id, status: e.decision.status, note: e.note };
         default:
           return e;
       }
@@ -480,6 +482,23 @@ export function createApp(services: Services, opts: { webOrigin?: string } = {})
 
   app.post('/api/sessions/:id/previews/:pid/dismiss', async (c) => {
     const { snapshot } = await services.dismissPreview(c.req.param('id'), c.req.param('pid'));
+    return c.json(view(snapshot));
+  });
+
+  /** Technical decisions: re-evaluate one on request, dismiss it, or act on one of its findings. */
+  app.post('/api/sessions/:id/decisions/:did/evaluate', async (c) => {
+    const { snapshot } = await services.requestDecisionEvaluation(c.req.param('id'), c.req.param('did'));
+    return c.json(view(snapshot), 202);
+  });
+
+  app.post('/api/sessions/:id/decisions/:did/dismiss', async (c) => {
+    const { snapshot } = await services.dismissDecision(c.req.param('id'), c.req.param('did'));
+    return c.json(view(snapshot));
+  });
+
+  app.post('/api/sessions/:id/decisions/:did/findings/:fid/actions', async (c) => {
+    const { action } = await json(c, z.object({ action: z.enum(['dismiss', 'restore', 'mark_useful', 'mark_not_useful']) }));
+    const { snapshot } = await services.actOnFinding(c.req.param('id'), c.req.param('did'), c.req.param('fid'), action);
     return c.json(view(snapshot));
   });
 

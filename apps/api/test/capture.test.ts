@@ -84,6 +84,16 @@ beforeAll(async () => {
 });
 afterAll(() => server.close());
 
+/** Live capture shows turns at once and analyses them in the background; wait until it has caught up. */
+async function analysed(id: string) {
+  for (let i = 0; i < 200; i++) {
+    const view = (await call('GET', `/api/sessions/${id}`)).body;
+    if (view.state.analyzedThrough === view.segments.length - 1) return view;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error('analysis did not catch up');
+}
+
 describe('meeting capture through Recall.ai', () => {
   it('reports what is configured without exposing keys', async () => {
     const cfg = (await call('GET', '/api/capture/config')).body;
@@ -116,7 +126,7 @@ describe('meeting capture through Recall.ai', () => {
     const retry = await call('POST', `/api/sessions/${id}/capture/recall/events`, batch);
     expect(retry.body.capture).toMatchObject({ segments: 3, duplicates: 3 });
 
-    const view = (await call('GET', `/api/sessions/${id}`)).body;
+    const view = await analysed(id);
     expect(view.segments.map((s: any) => s.text)).toHaveLength(3);
     expect(view.state.participants.map((p: any) => p.displayName)).toEqual(['Priya', 'Sam']);
     expect(view.state.discrepancies.find((d: any) => d.visibility === 'live')).toMatchObject({ category: 'false_alignment' });
@@ -147,7 +157,7 @@ describe('meeting capture through Recall.ai', () => {
       utterance('Host', 'Sounds good.', 14),
     ]);
     expect(r.body.capture).toMatchObject({ localName: 'Priya', remoteParticipants: ['Sam'], segments: 3 });
-    const view = (await call('GET', `/api/sessions/${body.id}`)).body;
+    const view = await analysed(body.id);
     expect(view.state.participants.map((p: any) => p.displayName)).toEqual(['Priya', 'Sam']);
     expect(view.state.discrepancies.find((d: any) => d.visibility === 'live')).toMatchObject({ category: 'false_alignment' });
     await call('POST', `/api/sessions/${body.id}/capture/stop`);
@@ -163,7 +173,7 @@ describe('meeting capture through Recall.ai', () => {
       utterance('Guest', 'Sounds good.', 14),
     ]);
     expect(r.body.capture.remoteParticipants).toEqual(['Sam', 'Lee']);
-    const view = (await call('GET', `/api/sessions/${body.id}`)).body;
+    const view = await analysed(body.id);
     expect(view.state.participants).toEqual([expect.objectContaining({ displayName: 'Others', ambiguous: true })]);
     const live = view.state.discrepancies.filter((d: any) => d.visibility === 'live');
     expect(live.map((d: any) => d.category)).toEqual(['missing_specification']);

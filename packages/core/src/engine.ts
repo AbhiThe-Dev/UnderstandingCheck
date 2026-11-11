@@ -1,12 +1,14 @@
 import { mergeConfig, type DeepPartial, type EngineConfig } from './config';
 import { CONSEQUENCE_WEIGHT, describeEffect } from './lexicon';
-import { PreviewError, type Analyzer, type ClarificationPurpose, type PreviewInput, type PreviewResult, type RawCandidate, type SegmentAnalysis, type SlackContextItem, type SymbolSearch, type UsageSink } from './ports';
+import { DecisionError, PreviewError, type Analyzer, type DecisionInput, type DecisionResult, type RawDecisionFinding, type ClarificationPurpose, type PreviewInput, type PreviewResult, type RawCandidate, type SegmentAnalysis, type SlackContextItem, type SymbolSearch, type UsageSink } from './ports';
 import { decide, hasLiveCapacity, scoreDiscrepancy } from './prioritizer';
 import { RetrievalCache, retrieveContext, toEvidence } from './retrieval';
+import { HeuristicAnalyzer } from './analyzers/heuristic';
 import { buildFactSheet } from './facts';
 import { slackPointer } from './slack';
+import { decisionSignal, dependentsFinding, objectsTo, pickLiveFinding, validateDecision } from './decisions';
 import { EMPTY_PREVIEW_USAGE, discussionWindow, isSensitivePath, onlyAgrees, previewInputHash, previewSignal, proposesChange, rulePreview, sameDecision, validatePreview } from './preview';
-import { contentTerms, estimateTokens, leadingYesNo, words } from './text';
+import { contentTerms, estimateTokens, leadingYesNo, truncate as truncateText, words } from './text';
 import { addPosition, consensus, firmPositions, isOpen, isPriorRecord, needsIndependentAnswer, setStatus } from './tracker';
 import type {
   Claim,
@@ -24,6 +26,7 @@ import type {
   Requirement,
   Segment,
   SessionState,
+  TechnicalDecision,
   TranscriptSegmentInput,
 } from './types';
 import { analyzeSegmentHeuristic, updateFocus } from './understanding';
@@ -54,6 +57,19 @@ export interface PreviewJob {
 }
 
 export type PreviewOutcome = { result: PreviewResult } | { error: string; usage: PreviewResult['usage'] };
+
+/** A decision evaluation ready to run outside the session's queue (see `beginDecision`). */
+export interface DecisionJob {
+  decisionId: string;
+  input: DecisionInput;
+  inputHash: string;
+  /** Last turn the evaluation reads. */
+  through: number;
+}
+
+export type DecisionOutcome = { result: DecisionResult } | { error: string; usage: DecisionResult['usage'] };
+
+export type FindingAction = 'dismiss' | 'restore' | 'mark_useful' | 'mark_not_useful';
 
 export type DiscrepancyAction = 'ask_now' | 'dismiss' | 'save_for_later' | 'restore' | 'mark_useful' | 'mark_not_useful';
 
@@ -138,6 +154,9 @@ export class SessionEngine {
   private segMap: Map<string, Segment>;
   private cfg: EngineConfig;
   private cache: RetrievalCache;
+  /** Rule-based analysis for turns the model fell behind on. */
+  private rules = new HeuristicAnalyzer();
+  private turnAnalyzer: Analyzer | null = null;
   /** Slack message text by ref id. Deliberately not in `state`, so it is never persisted. */
   private slackItems = new Map<string, SlackContextItem>();
 
@@ -206,7 +225,20 @@ export class SessionEngine {
     return events;
   }
 
+  /** Record a turn and analyse it right away (manual input, replays, tests). */
   async ingest(input: TranscriptSegmentInput): Promise<EngineEvent[]> {
+    const events = this.record(input);
+    const added = events.find((e): e is Extract<EngineEvent, { type: 'segment_added' }> => e.type === 'segment_added');
+    if (!added) return events;
+    events.push(...(await this.analyzeTurn(added.segment, this.deps.analyzer)));
+    return events;
+  }
+
+  /**
+   * Live capture, step 1: store the turn so it shows in the transcript at once. No model calls.
+   * `analyzePending` analyses it afterwards.
+   */
+  record(input: TranscriptSegmentInput): EngineEvent[] {
     if (input.externalId) {
       const seen = (this.state.externalIds ??= []);
       if (seen.includes(input.externalId)) {
@@ -215,17 +247,8 @@ export class SessionEngine {
       }
       seen.push(input.externalId);
     }
-    const started = performance.now();
-    try {
-      return await this.ingestSegment(input);
-    } finally {
-      const samples = (this.state.metrics.latencyMs ??= []);
-      samples.push(Math.round((performance.now() - started) * 100) / 100);
-      if (samples.length > LATENCY_SAMPLES) samples.splice(0, samples.length - LATENCY_SAMPLES);
-    }
-  }
-
-  private async ingestSegment(input: TranscriptSegmentInput): Promise<EngineEvent[]> {
+    // Sessions saved before turns were recorded and analysed separately: everything so far was analysed.
+    this.state.analyzedThrough ??= this.segments.length - 1;
     const events: EngineEvent[] = [];
     const participant = this.resolveParticipant(input.speaker, input.role, events);
     const last = this.segments.at(-1);
@@ -240,11 +263,59 @@ export class SessionEngine {
     this.segMap.set(segment.id, segment);
     this.state.metrics.segmentsSeen++;
     events.push({ type: 'segment_added', segment });
+    return events;
+  }
+
+  /** Turns recorded but not yet analysed. */
+  get pendingTurns(): number {
+    return this.segments.length - 1 - (this.state.analyzedThrough ?? this.segments.length - 1);
+  }
+
+  /**
+   * Live capture, step 2: analyse recorded turns in order. When newer turns are already waiting
+   * (the model fell behind), an older turn gets the free rule-based analysis instead of a model call:
+   * it still counts as context, but the newest turns get the model's attention.
+   */
+  async analyzePending(): Promise<EngineEvent[]> {
+    const events: EngineEvent[] = [];
+    while (this.pendingTurns > 0) {
+      const next = this.segments[(this.state.analyzedThrough ?? -1) + 1]!;
+      const newer = this.segments.length - 1 - next.index;
+      const stale = newer >= this.cfg.liveAnalysis.fullTurns;
+      if (stale) this.state.metrics.staleTurns = (this.state.metrics.staleTurns ?? 0) + 1;
+      events.push(...(await this.analyzeTurn(next, stale ? this.rules : this.deps.analyzer)));
+    }
+    return events;
+  }
+
+  private async analyzeTurn(segment: Segment, analyzer: Analyzer): Promise<EngineEvent[]> {
+    const started = performance.now();
+    this.turnAnalyzer = analyzer;
+    try {
+      return await this.analyzeSegment(segment);
+    } finally {
+      this.turnAnalyzer = null;
+      this.state.analyzedThrough = Math.max(this.state.analyzedThrough ?? -1, segment.index);
+      const samples = (this.state.metrics.latencyMs ??= []);
+      samples.push(Math.round((performance.now() - started) * 100) / 100);
+      if (samples.length > LATENCY_SAMPLES) samples.splice(0, samples.length - LATENCY_SAMPLES);
+    }
+  }
+
+  /** The analyzer for the turn being analysed (rules for stale turns), else the session's. */
+  private get analyzer(): Analyzer {
+    return this.turnAnalyzer ?? this.deps.analyzer;
+  }
+
+  private async analyzeSegment(segment: Segment): Promise<EngineEvent[]> {
+    const events: EngineEvent[] = [];
+    const participant = this.state.participants.find((p) => p.id === segment.participantId)!;
     if (this.state.ended) return events;
 
-    const recent = this.segments.slice(-this.cfg.recentWindow);
+    // Context as of this turn: later turns may already be recorded while it is analysed.
+    const recent = this.segments.slice(Math.max(0, segment.index - this.cfg.recentWindow + 1), segment.index + 1);
     const ctx = { state: this.state, segment, participant, recent };
-    const analysis = await this.deps.analyzer.analyzeSegment(ctx);
+    const analysis = await this.analyzer.analyzeSegment(ctx);
     const claim: Claim = {
       id: this.nextId('c'),
       segmentId: segment.id,
@@ -269,8 +340,11 @@ export class SessionEngine {
       events.push({ type: 'analysis_skipped', segmentId: segment.id, reason: 'no requirement, proposal, agreement or code reference' });
       // An imperative request ("remove their premium access") can still be a change worth previewing, and a
       // short answer ("immediately, even if they're signed in") can still settle an open preview question.
-      const evidence = proposesChange(segment.text, analysis) ? await this.retrieve(analysis, events) : [];
+      // So can a terse technical decision ("we'll cache it in Redis").
+      const changeLike = proposesChange(segment.text, analysis) || decisionSignal({ text: segment.text, analysis, evidence: [] }) !== null;
+      const evidence = changeLike ? await this.retrieve(analysis, events) : [];
       this.notePreview(segment, analysis, evidence, [], events);
+      this.noteDecision(segment, analysis, evidence, events);
       await this.settle(segment.index, events);
       return events;
     }
@@ -286,7 +360,7 @@ export class SessionEngine {
 
     const slack = this.slackContext(analysis);
     const facts = buildFactSheet({ state: this.state, segments: this.segments, evidence: candidateEvidence, slack, recentWindow: this.cfg.recentWindow });
-    const raw = await this.deps.analyzer.generateCandidates({ ctx, analysis, claim, evidence: candidateEvidence, slack, facts, reportDispute: this.disputeSink(events) });
+    const raw = await this.analyzer.generateCandidates({ ctx, analysis, claim, evidence: candidateEvidence, slack, facts, reportDispute: this.disputeSink(events) });
     const touched: Discrepancy[] = [];
     for (const c of raw) {
       const d = await this.acceptCandidate(c, segment, events, slack);
@@ -294,6 +368,7 @@ export class SessionEngine {
     }
     // This turn's own retrieval: the long-lived focus would make every later turn look like the same decision.
     this.notePreview(segment, analysis, evidence, touched, events);
+    this.noteDecision(segment, analysis, evidence, events);
     await this.settle(segment.index, events);
     this.recordVerbalAgreement(claim, touched, events);
     return events;
@@ -384,6 +459,8 @@ export class SessionEngine {
     const events: EngineEvent[] = [];
     if (this.state.ended) return events;
     const at = this.segments.length;
+    // Proposals nobody turned down count as decided; `Services.endSession` evaluates them for the summary.
+    this.adoptAtEnd(events);
     for (const d of this.state.discrepancies) {
       if (!isOpen(d)) continue;
       if (d.decision === 'suppress' && d.visibility === 'hidden') continue;
@@ -441,7 +518,7 @@ export class SessionEngine {
       (paths.some((p) => inPath(sym, p)) ? 1 : 0);
     const unique = new Map([...named, ...inFiles].map((s) => [s.id, s]));
     const ranked = [...unique.values()]
-      .filter((s) => !s.isTest)
+      .filter((s) => !s.isTest && s.symbolType !== 'doc')
       .sort((a, b) => score(b) - score(a) || b.effects.length - a.effects.length)
       .slice(0, this.cfg.retrieval.maxSymbols);
 
@@ -810,6 +887,364 @@ export class SessionEngine {
     });
   }
 
+  // ------------------------------------------------------------------ technical decisions
+
+  /**
+   * Free, on every analysed turn: track technical decisions (architecture, technology, implementation
+   * approach). A turn about an open decision joins it, and agreement adopts it, an objection before
+   * adoption rejects it. A new decision starts as proposed and is adopted once someone agrees or
+   * `adoptAfterTurns` turns pass without objection. Only adopted decisions are evaluated, so ideas the
+   * team drops cost nothing.
+   */
+  private noteDecision(segment: Segment, analysis: SegmentAnalysis, evidence: CodeEvidence[], events: EngineEvent[]) {
+    const decisions = (this.state.decisions ??= []);
+    const cfg = this.cfg.decisions;
+    const primary = evidence.filter((e) => !e.isTest && e.reason.startsWith('matches')).map((e) => e.symbolId);
+    const signal = decisionSignal({ text: segment.text, analysis, evidence });
+    const agrees = analysis.kinds.includes('agreement') || leadingYesNo(segment.text) === 'yes';
+
+    const linked = [...decisions].reverse().find((d) => {
+      if (d.status === 'dismissed') return false;
+      if (sameDecision(d, analysis.terms, primary, this.cfg.preview.minOverlap)) return true;
+      // A short reply right after the decision ("sounds good", "no, that won't scale") belongs to it.
+      const last = this.segMap.get(d.segmentIds.at(-1)!);
+      if (!last || segment.index - last.index > this.cfg.preview.followUpTurns) return false;
+      return segment.index - last.index === 1 && segment.participantId !== last.participantId && (agrees || objectsTo(analysis) || leadingYesNo(segment.text) !== null);
+    });
+
+    // "No, let's use Postgres instead": turns the open proposal down and is a decision of its own.
+    const counter = !!linked && linked.status === 'proposed' && objectsTo(analysis) && !!signal?.decisive && signal.score >= cfg.detectThreshold;
+    if (counter) {
+      linked.status = 'rejected';
+      linked.segmentIds.push(segment.id);
+      events.push({ type: 'decision_updated', decision: linked, note: 'rejected' });
+    }
+    if (linked && !counter && !linked.segmentIds.includes(segment.id)) {
+      const d = linked;
+      d.segmentIds.push(segment.id);
+      if (analysis.terms.length) d.terms = [...new Set([...d.terms, ...analysis.terms])].slice(0, 40);
+      if (signal) {
+        d.symbolIds = [...new Set([...d.symbolIds, ...signal.symbolIds])];
+        d.topics = [...new Set([...d.topics, ...signal.topics])];
+        d.dimensions = [...new Set([...d.dimensions, ...signal.dimensions])];
+      }
+      let note = 'linked';
+      if (d.status === 'proposed') {
+        if (objectsTo(analysis)) {
+          d.status = 'rejected';
+          note = 'rejected';
+        } else if (agrees && segment.participantId !== d.proposedBy) {
+          this.adoptDecision(d, 'agreed', segment.index);
+          note = 'adopted';
+        }
+      } else if (d.status === 'rejected' && signal?.decisive && !objectsTo(analysis)) {
+        d.status = 'proposed'; // brought back ("actually, let's go with Redis after all")
+        d.summary = truncateText(segment.text, 240);
+        d.proposedBy = segment.participantId;
+        note = 'proposed again';
+      } else if (d.evaluatedThroughSegmentIndex !== null && segment.index > d.evaluatedThroughSegmentIndex) {
+        d.newSegmentIds.push(segment.id);
+      }
+      events.push({ type: 'decision_updated', decision: d, note });
+    } else if ((!linked || counter) && signal && signal.score >= cfg.detectThreshold) {
+      const d: TechnicalDecision = {
+        id: this.nextId('td'),
+        status: 'proposed',
+        topics: signal.topics,
+        dimensions: signal.dimensions,
+        terms: signal.terms,
+        symbolIds: signal.symbolIds,
+        segmentIds: [segment.id],
+        proposedBy: segment.participantId,
+        createdAtSegmentIndex: segment.index,
+        adoptedAtSegmentIndex: null,
+        adoption: null,
+        score: signal.score,
+        summary: truncateText(segment.text, 240),
+        verdict: null,
+        findings: [],
+        evidenceIds: evidence.map((e) => e.id),
+        evaluatedThroughSegmentIndex: null,
+        newSegmentIds: [],
+        inputHash: null,
+        removed: [],
+        usage: { ...EMPTY_PREVIEW_USAGE },
+        evaluations: 0,
+        cacheHits: 0,
+        error: null,
+      };
+      decisions.push(d);
+      this.state.metrics.decisionsDetected = (this.state.metrics.decisionsDetected ?? 0) + 1;
+      events.push({ type: 'decision_updated', decision: d, note: 'proposed' });
+    }
+
+    // Unopposed for long enough: decided.
+    for (const d of decisions) {
+      if (d.status !== 'proposed') continue;
+      const last = this.segMap.get(d.segmentIds.at(-1)!);
+      if (last && segment.index - last.index >= cfg.adoptAfterTurns) {
+        this.adoptDecision(d, 'unopposed', segment.index);
+        events.push({ type: 'decision_updated', decision: d, note: 'adopted' });
+      }
+    }
+  }
+
+  private adoptDecision(d: TechnicalDecision, how: NonNullable<TechnicalDecision['adoption']>, at: number) {
+    d.status = 'adopted';
+    d.adoption = how;
+    d.adoptedAtSegmentIndex = at;
+  }
+
+  private adoptAtEnd(events: EngineEvent[]) {
+    for (const d of this.state.decisions ?? []) {
+      if (d.status !== 'proposed') continue;
+      this.adoptDecision(d, 'meeting_end', this.segments.length - 1);
+      events.push({ type: 'decision_updated', decision: d, note: 'adopted' });
+    }
+  }
+
+  /** Adopted decisions waiting for evaluation (cheap; lets callers skip scheduling a no-op). */
+  decisionsDue(): TechnicalDecision[] {
+    return (this.state.decisions ?? []).filter((d) => d.status === 'adopted');
+  }
+
+  decision(id: string): TechnicalDecision {
+    const d = this.state.decisions?.find((x) => x.id === id);
+    if (!d) throw new Error(`Unknown decision ${id}`);
+    return d;
+  }
+
+  dismissDecision(id: string): EngineEvent[] {
+    const d = this.decision(id);
+    d.status = 'dismissed';
+    for (const f of d.findings) if (f.visibility === 'live') f.visibility = 'noted';
+    return [{ type: 'decision_updated', decision: d, note: 'dismissed' }];
+  }
+
+  /** Evaluate a decision again on request (e.g. after the discussion moved on), or one that was skipped or failed. */
+  requestDecisionEvaluation(id: string): EngineEvent[] {
+    const d = this.decision(id);
+    if (d.status === 'evaluating') return [];
+    if (d.status === 'rejected') throw new Error('The team turned this decision down');
+    this.adoptDecision(d, d.adoption ?? 'agreed', this.segments.length - 1);
+    d.inputHash = null; // asked for on purpose: read the latest discussion even if nothing else changed
+    return [{ type: 'decision_updated', decision: d, note: 'requested' }];
+  }
+
+  actOnFinding(decisionId: string, findingId: string, action: FindingAction): EngineEvent[] {
+    const d = this.decision(decisionId);
+    const f = d.findings.find((x) => x.id === findingId);
+    if (!f) throw new Error(`Unknown finding ${findingId}`);
+    if (action === 'dismiss') f.visibility = 'hidden';
+    else if (action === 'restore') {
+      f.visibility = 'live';
+      f.surfacedAtSegmentIndex ??= this.segments.length - 1;
+    } else f.feedback = action === 'mark_useful' ? 'useful' : 'not_useful';
+    return [{ type: 'decision_updated', decision: d, note: action }];
+  }
+
+  /**
+   * Step 1 of an evaluation, inside the session's queue: gather the decision's code (what it names, who
+   * calls it, its tests), documentation and Slack within the decision budget, and compute the free rule
+   * findings. With nothing to judge it by, the decision is skipped (no model call); with an unchanged
+   * input another decision's answer is reused; without an AI analyzer, past the meeting's evaluation
+   * cap or over budget, rule findings alone are stored. Otherwise `job` is returned for `analyzeDecision`.
+   */
+  async beginDecision(id: string): Promise<{ decision: TechnicalDecision; job: DecisionJob | null; events: EngineEvent[] }> {
+    const events: EngineEvent[] = [];
+    const d = this.decision(id);
+    const cfg = this.cfg.decisions;
+    if (d.status !== 'adopted') return { decision: d, job: null, events };
+    const discussion = discussionWindow(this.segments, d.segmentIds, { ...this.cfg.preview, maxDiscussionTurns: cfg.maxDiscussionTurns, maxDiscussionChars: cfg.maxDiscussionChars });
+    let evidence: CodeEvidence[];
+    try {
+      evidence = await this.decisionEvidence(d, discussion);
+    } catch (err) {
+      d.status = 'failed';
+      d.error = `Could not search the repository: ${(err as Error).message}`;
+      events.push({ type: 'decision_updated', decision: d, note: 'failed' });
+      return { decision: d, job: null, events };
+    }
+    const slack = this.slackContext({ terms: d.terms });
+    if (evidence.length === 0 && slack.length === 0) {
+      d.status = 'skipped';
+      d.verdict = 'Nothing in the indexed repository, its documentation or Slack to check this decision against.';
+      events.push({ type: 'decision_updated', decision: d, note: 'skipped' });
+      return { decision: d, job: null, events };
+    }
+    const changed = evidence.filter((e) => !e.isTest && e.reason.startsWith('matches'));
+    const callers = evidence.filter((e) => e.reason.startsWith('calls '));
+    const rule = dependentsFinding({ discussion, focusSegmentIds: d.segmentIds, changed, callers });
+    const ruleFindings: RawDecisionFinding[] = rule ? [rule] : [];
+    const input: DecisionInput = { state: this.state, decision: { id: d.id, topics: d.topics, dimensions: d.dimensions, segmentIds: d.segmentIds }, discussion, evidence, slack, ruleFindings };
+    const inputHash = previewInputHash({
+      commitSha: this.state.commitSha,
+      segmentIds: discussion.map((s) => s.id),
+      evidenceIds: evidence.map((e) => e.id),
+      requirementIds: [],
+      slackIds: slack.map((x) => x.ref.id),
+      priorIds: this.state.priorDecisions.map((p) => p.id),
+    });
+    const job: DecisionJob = { decisionId: d.id, input, inputHash, through: discussion.at(-1)?.index ?? -1 };
+
+    // Same input as another evaluated decision (a decision restated later): reuse it, no model call.
+    const twin = (this.state.decisions ?? []).find((x) => x !== d && x.status === 'evaluated' && x.inputHash === inputHash);
+    if (twin) {
+      d.cacheHits++;
+      this.state.metrics.decisionCacheHits = (this.state.metrics.decisionCacheHits ?? 0) + 1;
+      return { decision: d, job: null, events: [...events, ...this.storeEvaluation(d, job, { isDecision: true, decision: twin.summary, findings: [], verdict: twin.verdict }, [], { reuse: twin })] };
+    }
+    const spent = (this.state.decisions ?? []).reduce((n, x) => n + x.evaluations, 0);
+    const rulesOnly = !this.deps.analyzer.evaluateDecision
+      ? 'Checked by rule-based checks only (AI evaluation is off).'
+      : spent >= cfg.maxEvaluationsPerSession
+        ? "Checked by rule-based checks only: this meeting's AI evaluations are used up."
+        : (await this.overBudget(events))
+          ? 'Checked by rule-based checks only: the AI budget for this month is used up.'
+          : null;
+    if (rulesOnly) {
+      return { decision: d, job: null, events: [...events, ...this.storeEvaluation(d, job, { isDecision: true, decision: d.summary, findings: [], verdict: rulesOnly }, ruleFindings)] };
+    }
+    d.status = 'evaluating';
+    d.error = null;
+    events.push({ type: 'decision_updated', decision: d, note: 'evaluating' });
+    return { decision: d, job, events };
+  }
+
+  /** Step 2, outside the queue: the model call. Reads only the job; changes no state; never throws. */
+  async analyzeDecision(job: DecisionJob): Promise<DecisionOutcome> {
+    const a = this.deps.analyzer;
+    if (!a.evaluateDecision) return { error: 'No AI analyzer', usage: EMPTY_PREVIEW_USAGE };
+    try {
+      return { result: await a.evaluateDecision(job.input) };
+    } catch (err) {
+      return { error: err instanceof DecisionError ? err.message : 'The evaluation failed.', usage: err instanceof DecisionError ? err.usage : EMPTY_PREVIEW_USAGE };
+    }
+  }
+
+  /** Step 3, back in the queue: validate, store, and decide whether one finding interrupts the meeting. */
+  finishDecision(job: DecisionJob, outcome: DecisionOutcome): EngineEvent[] {
+    const d = this.decision(job.decisionId);
+    const u = 'result' in outcome ? outcome.result.usage : outcome.usage;
+    d.usage = {
+      calls: d.usage.calls + u.calls,
+      inputTokens: d.usage.inputTokens + u.inputTokens,
+      cachedInputTokens: d.usage.cachedInputTokens + u.cachedInputTokens,
+      outputTokens: d.usage.outputTokens + u.outputTokens,
+      costUsd: d.usage.costUsd + u.costUsd,
+      model: u.model ?? d.usage.model,
+    };
+    d.evaluations++;
+    this.state.metrics.decisionsEvaluated = (this.state.metrics.decisionsEvaluated ?? 0) + 1;
+    if ('error' in outcome) {
+      // The free rule findings still stand; the model's part is reported as failed.
+      const events = this.storeEvaluation(d, job, { isDecision: true, decision: d.summary, findings: [], verdict: null }, job.input.ruleFindings);
+      d.error = `AI evaluation failed (${outcome.error}); showing rule-based checks only.`;
+      if (d.findings.length === 0) d.status = 'failed';
+      return events;
+    }
+    return this.storeEvaluation(d, job, outcome.result.raw, job.input.ruleFindings);
+  }
+
+  /** Begin, analyse and finish every due decision (manual input, replays and tests). */
+  async evaluateDueDecisions(): Promise<EngineEvent[]> {
+    const events: EngineEvent[] = [];
+    for (let d = this.decisionsDue()[0]; d; d = this.decisionsDue()[0]) {
+      const r = await this.beginDecision(d.id);
+      events.push(...r.events);
+      if (r.job) events.push(...this.finishDecision(r.job, await this.analyzeDecision(r.job)));
+    }
+    return events;
+  }
+
+  private storeEvaluation(d: TechnicalDecision, job: DecisionJob, raw: Parameters<typeof validateDecision>[0], ruleFindings: RawDecisionFinding[], opts: { reuse?: TechnicalDecision } = {}): EngineEvent[] {
+    const cfg = this.cfg.decisions;
+    const v = opts.reuse
+      ? { summary: opts.reuse.summary, verdict: opts.reuse.verdict, findings: opts.reuse.findings.map(({ id: _id, visibility: _v, surfacedAtSegmentIndex: _s, feedback: _f, ...f }) => f), removed: opts.reuse.removed }
+      : validateDecision(raw, { evidence: job.input.evidence, commitSha: this.state.commitSha, slack: job.input.slack, cfg, ruleFindings });
+    const previous = new Map(d.findings.map((f) => [f.key, f]));
+    // A consequence already raised for another decision is not raised twice.
+    const elsewhere = new Set((this.state.decisions ?? []).filter((x) => x !== d).flatMap((x) => x.findings.filter((f) => f.visibility !== 'hidden').map((f) => f.key)));
+    const removed = [...v.removed];
+    d.findings = v.findings.flatMap((f) => {
+      if (elsewhere.has(f.key)) {
+        removed.push({ reason: 'duplicate', detail: `${f.title} (raised for an earlier decision)` });
+        return [];
+      }
+      const prev = previous.get(f.key);
+      return [{ ...f, id: prev?.id ?? this.nextId('df'), visibility: prev?.visibility ?? 'noted', surfacedAtSegmentIndex: prev?.surfacedAtSegmentIndex ?? null, feedback: prev?.feedback ?? null }];
+    });
+    d.summary = v.summary ?? d.summary;
+    d.verdict = d.findings.length === 0 ? (v.verdict ?? 'No consequential issues found.') : null;
+    d.removed = removed;
+    d.evidenceIds = job.input.evidence.map((e) => e.id);
+    d.inputHash = job.inputHash;
+    d.evaluatedThroughSegmentIndex = job.through;
+    d.newSegmentIds = d.newSegmentIds.filter((id) => (this.segMap.get(id)?.index ?? -1) > job.through);
+    d.error = null;
+    if (d.status !== 'dismissed') d.status = 'evaluated';
+    const events: EngineEvent[] = [{ type: 'decision_updated', decision: d, note: 'evaluated' }];
+
+    // At most one finding per decision interrupts, and never one about a decision only settled as the meeting ended.
+    if (d.adoption !== 'meeting_end' && !this.state.ended) {
+      const openConcerns = this.state.discrepancies.filter((x) => x.visibility === 'live' && !['resolved', 'dismissed', 'unresolved', 'confirmed'].includes(x.status)).length;
+      const live = d.findings.some((f) => f.visibility === 'live') ? null : pickLiveFinding(d, this.state, cfg, openConcerns, this.cfg.rateLimit.maxOpenLive);
+      if (live) {
+        live.visibility = 'live';
+        live.surfacedAtSegmentIndex = this.segments.length - 1;
+        this.state.metrics.decisionFindingsSurfaced = (this.state.metrics.decisionFindingsSurfaced ?? 0) + 1;
+        events.push({ type: 'decision_updated', decision: d, note: 'surfaced' });
+      }
+    }
+    return events;
+  }
+
+  /**
+   * What a decision evaluation reads, within the decision budget: the code its words name (with its
+   * tests and one hop of calls), the code that calls it (the dependents a change would affect), code on
+   * screen or in focus when it is the same code, and matching documentation sections. Never
+   * secrets-like paths; nothing outside the session's repository.
+   */
+  private async decisionEvidence(d: TechnicalDecision, discussion: Segment[]): Promise<CodeEvidence[]> {
+    const search = this.deps.search;
+    if (!search) return [];
+    const cfg = this.cfg.decisions;
+    const own = discussion.filter((s) => d.segmentIds.includes(s.id));
+    const text = own.map((s) => s.text).join(' ');
+    const terms = [...new Set([...contentTerms(text), ...d.terms])];
+    const base = { ...this.cfg.retrieval, maxSymbols: cfg.maxSymbols, contextBudgetTokens: cfg.contextBudgetTokens, maxTestsPerSymbol: cfg.maxTestsPerSymbol };
+    const [code, docs] = await Promise.all([
+      retrieveContext({ terms, words: words(text) }, search, base, this.cache),
+      retrieveContext({ terms, words: words(text) }, search, { ...base, docs: 'only', maxSymbols: cfg.maxDocSections, contextBudgetTokens: cfg.docsBudgetTokens }, this.cache),
+    ]);
+    this.state.metrics.retrievals += 2;
+    this.state.metrics.retrievalCacheHits += Number(code.cacheHit) + Number(docs.cacheHit);
+    const out: CodeEvidence[] = code.evidence.map((e) => ({ ...this.poolEvidence(e), reason: e.reason }));
+    const add = (e: CodeEvidence) => {
+      if (!out.some((x) => x.id === e.id)) out.push(e);
+    };
+    for (const id of d.evidenceIds) {
+      const e = this.state.evidence.find((x) => x.id === id);
+      if (e && d.symbolIds.includes(e.symbolId)) add(e);
+    }
+    for (const e of this.screenEvidence()) if (d.symbolIds.includes(e.symbolId)) add(e);
+    const changed = out.filter((e) => !e.isTest && e.reason.startsWith('matches')).map((e) => e.symbolName);
+    if (changed.length > 0 && search.callersOf) {
+      for (const sym of await search.callersOf(changed, cfg.maxCallers)) {
+        const target = changed.find((n) => sym.calls.includes(n)) ?? changed[0];
+        add({ ...this.poolEvidence(toEvidence(sym, `calls ${target}`)), reason: `calls ${target}` });
+      }
+    }
+    for (const e of docs.evidence) add({ ...this.poolEvidence(e), reason: e.reason });
+    let tokens = 0;
+    const budget = (cfg.contextBudgetTokens + cfg.docsBudgetTokens) * 1.5;
+    return out.filter((e) => {
+      if (isSensitivePath(e.filePath)) return false;
+      tokens += estimateTokens(e.snippet);
+      return tokens <= budget;
+    });
+  }
+
   // ------------------------------------------------------------------ screening (tiered analyzer)
 
   /**
@@ -1037,7 +1472,7 @@ export class SessionEngine {
       createdAtSegmentId: segment.id,
       lastLinkedSegmentIndex: at,
       resolution: null,
-      history: [{ at, status: 'potential', note: `Detected by ${this.deps.analyzer.name}` }],
+      history: [{ at, status: 'potential', note: `Detected by ${this.analyzer.name}` }],
       notes: [],
       meta: c.meta,
     };
@@ -1192,7 +1627,7 @@ export class SessionEngine {
             c.purpose !== 'private_check' &&
             d.status === 'awaiting_response',
         );
-      const r = await this.deps.analyzer.interpretResponse(segment.text, d, {
+      const r = await this.analyzer.interpretResponse(segment.text, d, {
         clarification: clar,
         latestOtherPosition: this.latestOtherPosition(d, participant.id),
       });

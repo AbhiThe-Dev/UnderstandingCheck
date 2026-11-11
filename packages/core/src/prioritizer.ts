@@ -1,6 +1,7 @@
 import type { EngineConfig } from './config';
 import { CONSEQUENCE_WEIGHT } from './lexicon';
 import type { Discrepancy, SessionState } from './types';
+import { openLiveFindings } from './decisions';
 
 const TERMINAL = new Set(['resolved', 'dismissed', 'unresolved', 'confirmed']);
 const IDENTITY_DEPENDENT = new Set<Discrepancy['category']>(['false_alignment', 'direct_disagreement']);
@@ -58,7 +59,8 @@ export function decide(score: number, cfg: EngineConfig['scoring'], windowElapse
 /** True when the side panel has room for another live suggestion. */
 export function hasLiveCapacity(state: SessionState, cfg: EngineConfig['rateLimit']): boolean {
   const everLive = state.discrepancies.filter((d) => d.surfacedAtSegmentIndex !== null).length;
-  const openLive = state.discrepancies.filter((d) => d.visibility === 'live' && !TERMINAL.has(d.status)).length;
+  // Decision findings shown live take the same room in the panel.
+  const openLive = state.discrepancies.filter((d) => d.visibility === 'live' && !TERMINAL.has(d.status)).length + openLiveFindings(state);
   return everLive < cfg.maxLivePerSession && openLive < cfg.maxOpenLive;
 }
 

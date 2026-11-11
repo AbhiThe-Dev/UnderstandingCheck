@@ -6,6 +6,8 @@ import type {
   CandidateInput,
   ClarificationDraft,
   ClarificationPurpose,
+  DecisionInput,
+  DecisionResult,
   LlmProvider,
   LlmRequest,
   LlmUsage,
@@ -21,7 +23,7 @@ import type {
 } from '../ports';
 import type { Clarification, Discrepancy, Position, SessionState } from '../types';
 import { renderFactSheet, type FactSheet } from '../facts';
-import { LlmOutputError, PreviewError } from '../ports';
+import { DecisionError, LlmOutputError, PreviewError } from '../ports';
 import { EMPTY_PREVIEW_USAGE } from '../preview';
 import { contentTerms } from '../text';
 import { analyzeSegmentHeuristic } from '../understanding';
@@ -29,7 +31,9 @@ import { HeuristicAnalyzer, interpretResponseHeuristic } from './heuristic';
 import {
   CandidateSchema,
   ClarificationSchema,
+  DecisionSchema,
   ExtractionSchema,
+  renderDecisionInput,
   PROMPTS,
   ResponseSchema,
   SYSTEM_BASE,
@@ -59,6 +63,8 @@ export interface LlmAnalyzerOptions {
    * model took ~25 s and ~$0.006 with the same findings as the large one at ~42 s and ~$0.03.
    */
   previewTier?: ModelTier;
+  /** Model tier for technical decision evaluation (default: cheap; one call per adopted decision). */
+  decisionTier?: ModelTier;
   /**
    * Also keep the rule-based findings for each turn (free, instant). The model sees them as already
    * flagged and reuses their key, so the two never raise the same concern twice. Off by default here;
@@ -68,6 +74,10 @@ export interface LlmAnalyzerOptions {
 }
 
 const PREVIEW_TIMEOUT_MS = 90_000;
+
+/** Room the conversation always gets, and what the prompt around it takes beyond the code and transcript. */
+const MIN_TRANSCRIPT_CHARS = 6000;
+const PROMPT_OVERHEAD_CHARS = 3000;
 
 /**
  * Model-backed analyzer. Cheap heuristics still gate every call, so the model only sees
@@ -123,7 +133,7 @@ export class LlmAnalyzer implements Analyzer {
         operation: 'extraction',
         tier: 'cheap',
         system: `${SYSTEM_BASE}\n\n${PROMPTS.extraction}`,
-        user: `${renderState(ctx.state, 4)}\n\nNewest segment id: ${ctx.segment.id}`,
+        user: `${renderState(ctx.state, { turns: 4 })}\n\nNewest segment id: ${ctx.segment.id}`,
         schema: ExtractionSchema,
         schemaName: 'segment_extraction',
         maxOutputTokens: this.opts.limits.maxOutputTokens.extraction,
@@ -161,24 +171,28 @@ export class LlmAnalyzer implements Analyzer {
   }
 
   async generateCandidates(input: CandidateInput): Promise<RawCandidate[]> {
-    const { ctx, analysis, evidence, slack = [], hint, facts, reportDispute } = input;
+    const { ctx, analysis, evidence, slack = [], hint, facts, reportDispute, reportSettled } = input;
     const fromRules = this.opts.withRules ? await this.rules.generateCandidates(input) : [];
     // Slack only arrives when it shares terms with this segment (the engine filters it), so it can justify a call.
     const interesting =
       !!hint || evidence.length > 0 || slack.length > 0 || analysis.kinds.includes('disagreement') || analysis.kinds.includes('agreement') || analysis.reuseTarget;
     if (!interesting) return fromRules;
     const flagged = fromRules.length
-      ? `\n\nAlready flagged by rules for this segment (reuse the key if you describe the same concern; add only what they miss):\n${fromRules.map((c) => `- key=${c.key} [${c.category}] ${c.title}`).join('\n')}`
+      ? `\n\nAlready flagged by keyword rules for this segment (reuse the key if you describe the same concern; add only what they miss):\n${fromRules.map((c) => `- key=${c.key} [${c.category}] ${c.title}`).join('\n')}`
       : '';
     const sheet = this.opts.promptStyle === 'facts' ? facts : undefined;
     // Least-changing first (code, then Slack, then the conversation, then the facts) so consecutive calls share a cacheable prefix.
-    const user = `Retrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
+    const code = `Retrieved code:\n${renderEvidence(evidence, this.opts.limits.maxInputChars / 2)}${
       slack.length > 0 ? `\n\nSlack messages (earlier discussion):\n${renderSlack(slack, DEFAULT_CONFIG.retrieval.slackBudgetTokens * 4)}` : ''
-    }\n\n${renderState(ctx.state)}${
+    }`;
+    // The model sees the whole meeting so far (what fits after the code), so it knows what was already explained or settled.
+    const conversation = Math.max(MIN_TRANSCRIPT_CHARS, this.opts.limits.maxInputChars - code.length - PROMPT_OVERHEAD_CHARS);
+    const user = `${code}\n\n${renderState(ctx.state, { chars: conversation })}${
       sheet ? `\n\nFact sheet (machine-extracted; check before relying on it):\n${renderFactSheet(sheet)}` : ''
     }${flagged}\n\nNewest segment id: ${ctx.segment.id}${hint ? `\nA screening pass flagged this stretch: ${hint}` : ''}`;
     const base = { operation: 'candidates', tier: this.opts.candidatesTier ?? ('reasoning' as const), user, maxOutputTokens: this.opts.limits.maxOutputTokens.candidates };
     let candidates: (z.infer<typeof CandidateSchema>['candidates'][number] & { factIds?: string[] })[];
+    let settled: z.infer<typeof CandidateSchema>['settled'];
     try {
       if (sheet) {
         const out = await this.call({
@@ -193,13 +207,14 @@ export class LlmAnalyzer implements Analyzer {
           const fact = factText(sheet, fc.factId);
           if (fact) reportDispute?.({ factId: fc.factId, fact, reason: fc.reason });
         }
-        candidates = out.candidates;
+        ({ candidates, settled } = out);
       } else {
-        candidates = (await this.call({ ...base, system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`, schema: CandidateSchema, schemaName: 'discrepancy_candidates' })).candidates;
+        ({ candidates, settled } = await this.call({ ...base, system: `${SYSTEM_BASE}\n\n${PROMPTS.candidates}`, schema: CandidateSchema, schemaName: 'discrepancy_candidates' }));
       }
     } catch {
       return fromRules;
     }
+    for (const s of settled) reportSettled?.(s);
     return [...fromRules, ...candidates.map((c) => ({
       key: c.key,
       category: c.category,
@@ -266,6 +281,39 @@ export class LlmAnalyzer implements Analyzer {
     }
   }
 
+  /**
+   * One structured call per adopted technical decision (never per turn). The engine validates every
+   * citation and drops findings without evidence before anything is shown.
+   */
+  async evaluateDecision(input: DecisionInput): Promise<DecisionResult> {
+    const usage = { ...EMPTY_PREVIEW_USAGE };
+    const track = (u: LlmUsage, costUsd: number) => {
+      usage.calls++;
+      usage.inputTokens += u.inputTokens;
+      usage.cachedInputTokens += u.cachedInputTokens ?? 0;
+      usage.outputTokens += u.outputTokens;
+      usage.costUsd += costUsd;
+      usage.model = u.model;
+    };
+    try {
+      const raw = await this.call(
+        {
+          operation: 'decision',
+          tier: this.opts.decisionTier ?? 'cheap',
+          system: `${SYSTEM_BASE}\n\n${PROMPTS.decision}`,
+          user: renderDecisionInput(input, this.opts.limits.maxInputChars),
+          schema: DecisionSchema,
+          schemaName: 'decision_evaluation',
+          maxOutputTokens: this.opts.limits.maxOutputTokens.decision ?? DEFAULT_CONFIG.llm.maxOutputTokens.decision,
+        },
+        track,
+      );
+      return { raw, usage };
+    } catch (err) {
+      throw new DecisionError(err instanceof LlmOutputError ? 'the model answered, but the answer was unusable' : 'the model could not be reached', usage);
+    }
+  }
+
   async draftClarification(
     d: Discrepancy,
     purpose: ClarificationPurpose,
@@ -278,7 +326,8 @@ export class LlmAnalyzer implements Analyzer {
         operation: 'clarification',
         tier: 'cheap',
         system: `${SYSTEM_BASE}\n\n${PROMPTS.clarification}`,
-        user: `purpose=${purpose}${target ? ` (asked privately of ${target.displayName}, ${target.role})` : ''}\nConcern: ${renderDiscrepancy(d)}`,
+        // The recent conversation lets the question use the meeting's own words and skip what was just answered.
+        user: `${renderState(state, { turns: 16 })}\n\npurpose=${purpose}${target ? ` (asked privately of ${target.displayName}, ${target.role})` : ''}\nConcern: ${renderDiscrepancy(d)}`,
         schema: ClarificationSchema,
         schemaName: 'clarification',
         maxOutputTokens: this.opts.limits.maxOutputTokens.clarification,

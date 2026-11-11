@@ -83,6 +83,28 @@ describe('GitHubAppHost', () => {
     expect(calls.find((c) => c.body?.permissions?.issues)!.body.permissions).toEqual({ issues: 'read', metadata: 'read' });
   });
 
+  it('reads repositories the app is not installed on with the personal token, listed with installation 0', async () => {
+    const repo = (id: number, owner: string, name: string) => ({ id, name, full_name: `${owner}/${name}`, private: true, default_branch: 'main', language: 'TypeScript', html_url: `https://github.com/${owner}/${name}`, owner: { login: owner } });
+    const { fn, calls } = stubFetch({
+      'GET /app/installations': () => ({ json: [{ id: 42 }] }),
+      'POST /app/installations/42/access_tokens': tokenRoute,
+      'GET /installation/repositories': () => ({ json: { repositories: [repo(1, 'acme', 'app')] } }),
+      'GET /user/repos': () => ({ json: [repo(1, 'acme', 'app'), repo(2, 'org', 'web')] }),
+      'GET /repos/org/web/commits/main': () => ({ json: { sha: 'def456' } }),
+    });
+    const host = new GitHubAppHost({ appId: '99', privateKey, fetch: fn, userToken: 'gho_personal' });
+    const listed = await host.listRepositories();
+    expect(listed.map((r) => [r.fullName, r.installationId])).toEqual([['acme/app', 42], ['org/web', 0]]);
+
+    expect(await host.headCommit({ installationId: 0, owner: 'org', name: 'web' }, 'main')).toBe('def456');
+    expect(calls.at(-1)!.auth).toBe('Bearer gho_personal');
+
+    // Without the token configured, such a repository fails to sync but is not treated as revoked.
+    const without = new GitHubAppHost({ appId: '99', privateKey, fetch: fn });
+    const err = await without.headCommit({ installationId: 0, owner: 'org', name: 'web' }, 'main').catch((e) => e);
+    expect(err).not.toBeInstanceOf(RepoAccessError);
+  });
+
   describe('shallow checkout', () => {
     const root = mkdtempSync(join(tmpdir(), 'uc-gh-test-'));
     afterAll(() => rmSync(root, { recursive: true, force: true }));

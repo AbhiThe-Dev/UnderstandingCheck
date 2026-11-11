@@ -72,7 +72,7 @@ describe('GitHub App integration (fake GitHub)', () => {
     expect(created.status).toBe(201);
     repoId = created.body.id;
     const repo = await waitReady(repoId);
-    expect(repo).toMatchObject({ source: 'github', indexingStatus: 'ready', htmlUrl: `https://github.com/${REPO}`, lastSync: { mode: 'full', fetched: 11 } }); // 12 files; README.md is not code
+    expect(repo).toMatchObject({ source: 'github', indexingStatus: 'ready', htmlUrl: `https://github.com/${REPO}`, lastSync: { mode: 'full', fetched: 12 } }); // all 12 files: README.md is indexed as documentation
     expect(repo.symbolCount).toBeGreaterThan(20);
     expect(host.calls).toMatchObject({ checkout: 1, blob: 0 });
     expect((await call('GET', '/api/github/repositories')).body[0].connectedRepositoryId).toBe(repoId);

@@ -44,7 +44,7 @@ Priya (PO): Sounds good.`),
 
   it('asks for the model output in conversation-first order', () => {
     // The JSON schema sent to the model keeps this order, and models generate fields in schema order.
-    expect(Object.keys(FactCandidateSchema.shape)).toEqual(['agreements', 'openQuestions', 'factChecks', 'candidates']);
+    expect(Object.keys(FactCandidateSchema.shape)).toEqual(['agreements', 'openQuestions', 'factChecks', 'candidates', 'settled']);
   });
 });
 

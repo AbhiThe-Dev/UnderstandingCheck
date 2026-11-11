@@ -7,6 +7,7 @@ import { Suspense, useEffect, useState } from 'react';
 import type { TranscriptSegmentInput } from '@uc/core';
 import { InputPanel } from '@/components/session/InputPanel';
 import { LivePanel } from '@/components/session/LivePanel';
+import { DecisionLog, LiveDecisionCards, liveDecisionFindings } from '@/components/session/DecisionSection';
 import { PreviewSection } from '@/components/session/PreviewSection';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
 import { Transcript } from '@/components/session/Transcript';
@@ -262,9 +263,9 @@ function Copilot() {
               <Lock className="size-3" aria-hidden /> only you see these
             </span>
           </div>
-          {live.length === 0 && (
+          {live.length === 0 && liveDecisionFindings(state).length === 0 && (
             <div className="rounded-xl border border-dashed border-[var(--color-line)]">
-              <Empty>Nothing worth interrupting for. The copilot stays quiet unless people may expect different behavior.</Empty>
+              <Empty>Nothing worth interrupting for. The copilot stays quiet unless people may expect different behavior or a decision carries a real risk.</Empty>
             </div>
           )}
           {live.map((d) => (
@@ -280,7 +281,9 @@ function Copilot() {
               htmlUrl={repo?.htmlUrl}
             />
           ))}
+          <LiveDecisionCards sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={apply} />
           <PreviewSection sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={apply} />
+          <DecisionLog sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={apply} defaultOpen={ended} />
           {queued.length > 0 && (
             <div>
               <button className="text-xs text-[var(--color-muted)] hover:underline" onClick={() => setShowQueued((v) => !v)}>

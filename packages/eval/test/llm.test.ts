@@ -172,7 +172,7 @@ describe('rules and AI together (withRules)', () => {
     const { engine, provider } = await withRules({ candidates: [] });
     const rule = engine.state.discrepancies.find((d) => d.category === 'false_alignment');
     expect(rule).toBeDefined();
-    expect(provider.calls.some((c) => c.operation === 'candidates' && c.user.includes(`Already flagged by rules for this segment`) && c.user.includes(rule!.key))).toBe(true);
+    expect(provider.calls.some((c) => c.operation === 'candidates' && c.user.includes(`Already flagged by keyword rules for this segment`) && c.user.includes(rule!.key))).toBe(true);
   });
 
   it('does not raise the same concern twice when the model reuses the rule key', async () => {

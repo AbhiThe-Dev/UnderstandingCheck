@@ -3,6 +3,8 @@ import type {
   Analyzer,
   CandidateInput,
   ClarificationDraft,
+  DecisionInput,
+  DecisionResult,
   PreviewInput,
   PreviewResult,
   ClarificationPurpose,
@@ -62,5 +64,10 @@ export class TieredAnalyzer implements Analyzer {
   /** Requested by a person, so it goes straight to the large model (no screen in front). */
   previewImplementation(input: PreviewInput): Promise<PreviewResult> {
     return this.llm.previewImplementation(input);
+  }
+
+  /** Already gated by rules (adopted decisions only, one call each), so no screen in front either. */
+  evaluateDecision(input: DecisionInput): Promise<DecisionResult> {
+    return this.llm.evaluateDecision(input);
   }
 }

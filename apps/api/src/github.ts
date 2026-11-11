@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RepositoryRow, WorkspaceStore } from '@uc/db';
 import { MAX_FILE_BYTES, indexFiles, shouldIndexPath } from '@uc/indexer';
-import { RepoAccessError, type IssueSnapshot, type RepoHost, type RepoRef } from '@uc/providers';
+import { PERSONAL_TOKEN_INSTALLATION, RepoAccessError, type IssueSnapshot, type RepoHost, type RepoRef } from '@uc/providers';
 
 export interface SyncResult {
   mode: 'full' | 'incremental' | 'unchanged' | 'revoked';
@@ -117,7 +117,9 @@ export class GitHubSync {
         await this.store.purgeRepositoryCode(repositoryId);
         await this.store.updateRepository(repositoryId, {
           indexingStatus: 'revoked',
-          indexingError: 'The GitHub App no longer has access to this repository. Cached code was deleted. Reinstall the app on it to reconnect.',
+          indexingError: ref.installationId === PERSONAL_TOKEN_INSTALLATION
+            ? 'Your GitHub account no longer has access to this repository. Cached code was deleted.'
+            : 'The GitHub App no longer has access to this repository. Cached code was deleted. Reinstall the app on it to reconnect.',
           symbolCount: 0,
           indexedCommitSha: null,
           lastSyncedAt: new Date(),

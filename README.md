@@ -146,6 +146,21 @@ While a change is being discussed ("when a customer downgrades, remove their pre
 
 Endpoints: `POST /api/sessions/:id/previews` (`{ previewId? }`, returns 202; the result arrives on the session stream), `POST /api/sessions/:id/previews/:pid/dismiss`.
 
+### Technical decision evaluation
+
+When the team settles on a technical decision (an architecture change, a technology choice or an implementation approach), the copilot checks it against the code, the project's documentation and Slack, even when everyone agrees. It raises a finding only when the decision would likely cause rework, an incident or a security problem.
+
+- **Free detection:** after each analysed turn, rules recognise decision topics (caching, queues and background work, data storage and schema, APIs and integrations, service boundaries, auth and security, consistency and retries, technology choices, performance patterns) in a turn that proposes or commits to an approach. Questions, product requirements and bare agreement are not decisions.
+- **Only adopted decisions are evaluated:** a decision is adopted when someone else agrees, or when nobody objects for two turns. An objection before that turns it down, and a counter-proposal ("no, let's use the session cache instead") replaces it. Decisions still open when the meeting ends are evaluated for the summary only. Ideas the team drops cost nothing.
+- **One bounded call per decision:** retrieval reads the code the decision names, with its tests and one hop of calls; the code that *calls* it (dependents); and matching documentation sections, within a ~3.5k-token code and ~0.9k-token docs budget. One structured call goes to the small model (`UC_DECISION_TIER`), outside the session queue, so turns keep flowing. Decisions with nothing to check against are skipped without a call. An input hash reuses an identical earlier answer. The meeting has a cap of 8 evaluations (then rules only). Later discussion marks an evaluation as out of date; **Check again** re-runs it on request.
+- **Free rule check:** when a decision changes code by name ("replace `getSession`…") and other code calls it that nobody mentioned, that is a cited *overlooked dependency*. This works without a model too (`ANALYZER=heuristic`).
+- **Checked:** every finding must cite code or documentation lines inside evidence the evaluation was shown, at the session's commit, or a Slack message in context. A "better alternative" must name an alternative grounded in the repo, docs or Slack. Low-severity, low-confidence, duplicate and uncited findings are dropped and counted.
+- **Discreet:** at most one finding per decision appears live, only if it is high severity (or medium with ≥0.8 confidence), and not when a live concern already cites the same code. Decision cards share the panel's room with misunderstanding suggestions, with at most 3 per meeting. Everything else is noted in the collapsed **Technical decisions** log, where a finding can still be shown as a suggestion.
+- **Documentation:** Markdown files (README, `docs/`, ADRs; not changelogs or licenses) are indexed as heading-named sections next to the code. Only decision evaluation reads them; per-turn retrieval stays code-only.
+- **Measured** with `gpt-5-mini` on `demo/subscriptions` (2026-10-26): 7–17 s and $0.0016–$0.0034 per decision. "Cache entitlements in Redis with a 24-hour TTL" raised one live finding citing the documented one-hour downgrade rule (`docs/entitlements.md`). A sound decision (sending emails from a background queue) raised nothing live.
+
+Endpoints: `POST /api/sessions/:id/decisions/:did/evaluate` (202), `POST /api/sessions/:id/decisions/:did/dismiss`, `POST /api/sessions/:id/decisions/:did/findings/:fid/actions` (`{ action: dismiss | restore | mark_useful | mark_not_useful }`).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -156,12 +171,14 @@ Endpoints: `POST /api/sessions/:id/previews` (`{ previewId? }`, returns 202; the
 | `UC_SURFACING` | recall | AI analyzers show suggestions more readily (live threshold 0.45, up to 12 per meeting, discussion hold expires after a turn). `balanced` restores the rules-only settings |
 | `UC_PROMPT_STYLE`, `UC_CANDIDATES_TIER` | `raw`, `reasoning` | `facts` adds a code-computed fact sheet the model checks; `cheap` runs candidate analysis on the small model. Measured: about 70% cheaper, slightly more misses without rules |
 | `UC_PREVIEW_TIER` | `cheap` | Model tier for implementation previews; `reasoning` uses the large model (slower, ~5× the cost) |
+| `UC_DECISION_TIER` | `cheap` | Model tier for technical decision evaluation (one call per adopted decision) |
 | `OPENAI_API_KEY` | — | **Not provided.** Required only for the model-backed analyzer |
 | `UC_MODEL_CHEAP` / `UC_MODEL_REASONING` | `gpt-5-mini` / `gpt-5` | Model names per tier — verify they are current for your account |
 | `UC_MODEL_PRICES_JSON` | built-in table | Override per-model prices used for cost estimates, e.g. `{"gpt-5-mini":{"inputPerMTok":0.25,"outputPerMTok":2}}` |
 | `UC_DATA_DIR` | `.data/pglite` | Embedded Postgres data directory; `:memory:` for a throwaway database |
 | `API_PORT`, `WEB_ORIGIN`, `NEXT_PUBLIC_API_URL` | 4000, `http://localhost:3000`, `http://127.0.0.1:4000` | Wiring between web and API |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` | — | GitHub App credentials (`GITHUB_APP_PRIVATE_KEY` inline also works). Loaded from `.env` |
+| `GITHUB_GH_USER` / `GITHUB_TOKEN` | — | Also read repositories the GitHub App isn't installed on, with your own account: a GitHub CLI login to take the token from at startup, or a token. Read requests only, but the token isn't narrowed to one repository |
 | `GITHUB_SYNC_INTERVAL_MINUTES` | `5` | How often connected repositories are checked for new commits; `0` disables |
 | `RECALL_API_KEY`, `RECALL_REGION` | — | Recall.ai Desktop SDK for meeting capture (`us-west-2` = pay-as-you-go) |
 | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | — | Slack app credentials for **Connect Slack** |

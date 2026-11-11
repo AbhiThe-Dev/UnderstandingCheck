@@ -62,7 +62,8 @@ export const Effect = z.object({
 });
 export type Effect = z.infer<typeof Effect>;
 
-export const SymbolType = z.enum(['function', 'method', 'class', 'arrow_function', 'interface', 'type']);
+/** `doc` is a section of project documentation (Markdown): read by decision evaluation, never by per-turn retrieval. */
+export const SymbolType = z.enum(['function', 'method', 'class', 'arrow_function', 'interface', 'type', 'doc']);
 export type SymbolType = z.infer<typeof SymbolType>;
 
 export const CodeSymbol = z.object({
@@ -79,7 +80,7 @@ export const CodeSymbol = z.object({
   effects: z.array(Effect),
   imports: z.array(z.string()),
   isTest: z.boolean(),
-  language: z.enum(['typescript', 'tsx', 'javascript']),
+  language: z.enum(['typescript', 'tsx', 'javascript', 'markdown']),
 });
 export type CodeSymbol = z.infer<typeof CodeSymbol>;
 
@@ -437,6 +438,85 @@ export const ImplementationPreview = z.object({
 });
 export type ImplementationPreview = z.infer<typeof ImplementationPreview>;
 
+// ---------- Technical decision evaluation ----------
+
+/** The engineering qualities a technical decision is evaluated against. */
+export const QualityDimension = z.enum(['performance', 'scalability', 'reliability', 'security', 'maintainability', 'compatibility']);
+export type QualityDimension = z.infer<typeof QualityDimension>;
+
+/**
+ * One consequence of an adopted technical decision. Validation guarantees it rests on code, project
+ * documentation or Slack that the evaluation was shown; nothing speculative reaches the user.
+ */
+export const DecisionFinding = z.object({
+  id: z.string(),
+  /** Dedupe key across decisions, e.g. `compatibility:getSession`. */
+  key: z.string(),
+  /** risk: the decision as stated causes a problem; overlooked_dependency: something relies on what it changes; better_alternative: the repo, docs or Slack already offer a better way. */
+  kind: z.enum(['risk', 'overlooked_dependency', 'better_alternative']),
+  dimension: QualityDimension,
+  severity: z.enum(['high', 'medium']),
+  title: z.string(),
+  /** Concise explanation of the consequence (rework, outage, data exposure…). */
+  impact: z.string(),
+  /** Code and documentation the finding rests on (documentation sections are indexed like code). */
+  refs: z.array(CodeRef),
+  slackRefs: z.array(SlackCitation),
+  /** The better way, for better_alternative (and optionally for a risk): grounded in refs. */
+  alternative: z.string().nullable(),
+  /** One sentence the user could say to raise it. */
+  ask: z.string().nullable(),
+  confidence: z.number(),
+  source: z.enum(['rules', 'model']),
+  /** live: shown in the side panel; noted: kept for the decision log and summary; hidden: dismissed. */
+  visibility: z.enum(['live', 'noted', 'hidden']),
+  surfacedAtSegmentIndex: z.number().int().nullable(),
+  feedback: z.enum(['useful', 'not_useful']).nullable(),
+});
+export type DecisionFinding = z.infer<typeof DecisionFinding>;
+
+/**
+ * A technical decision made in the meeting (architecture, technology choice, implementation approach),
+ * detected by rules on every turn and evaluated once, with one bounded model call, when it is adopted.
+ */
+export const TechnicalDecision = z.object({
+  id: z.string(),
+  /**
+   * proposed: said, not yet adopted; adopted: agreed or unopposed, waiting for evaluation; rejected: turned
+   * down before adoption (never evaluated); evaluating; evaluated; skipped: no code, docs or Slack to judge
+   * it by (never sent to a model); failed; dismissed.
+   */
+  status: z.enum(['proposed', 'adopted', 'rejected', 'evaluating', 'evaluated', 'skipped', 'failed', 'dismissed']),
+  /** Technical topics the detector recognised, e.g. "caching", "message queue". */
+  topics: z.array(z.string()),
+  dimensions: z.array(QualityDimension),
+  terms: z.array(z.string()),
+  symbolIds: z.array(z.string()),
+  segmentIds: z.array(z.string()),
+  proposedBy: z.string(),
+  createdAtSegmentIndex: z.number().int(),
+  adoptedAtSegmentIndex: z.number().int().nullable(),
+  /** How it was adopted: someone agreed, nobody objected for a few turns, or the meeting ended. */
+  adoption: z.enum(['agreed', 'unopposed', 'meeting_end']).nullable(),
+  score: z.number(),
+  /** The decision in plain words (the evaluator's restatement; the proposing turn until then). */
+  summary: z.string(),
+  /** Set when the evaluation found nothing consequential (the normal outcome). */
+  verdict: z.string().nullable(),
+  findings: z.array(DecisionFinding),
+  evidenceIds: z.array(z.string()),
+  evaluatedThroughSegmentIndex: z.number().int().nullable(),
+  /** Turns about this decision after it was evaluated (the evaluation may be out of date). */
+  newSegmentIds: z.array(z.string()),
+  inputHash: z.string().nullable(),
+  removed: z.array(z.object({ reason: z.string(), detail: z.string() })),
+  usage: PreviewUsage,
+  evaluations: z.number().int(),
+  cacheHits: z.number().int(),
+  error: z.string().nullable(),
+});
+export type TechnicalDecision = z.infer<typeof TechnicalDecision>;
+
 export const EngineMetrics = z.object({
   segmentsSeen: z.number().int(),
   analysesRun: z.number().int(),
@@ -458,10 +538,17 @@ export const EngineMetrics = z.object({
   deepCalls: z.number().int().optional(),
   /** Fact-sheet facts the model said the transcript or code contradicts (rule mistakes to fix). */
   factsDisputed: z.number().int().optional(),
+  /** Live turns analysed by rules only because newer turns were already waiting for the model. */
+  staleTurns: z.number().int().optional(),
   /** Implementation previews: hints shown, analyses run, and requests answered from cache. */
   previewsSuggested: z.number().int().optional(),
   previewsGenerated: z.number().int().optional(),
   previewCacheHits: z.number().int().optional(),
+  /** Technical decisions: detected, evaluated by a model, answered from cache, and findings shown live. */
+  decisionsDetected: z.number().int().optional(),
+  decisionsEvaluated: z.number().int().optional(),
+  decisionCacheHits: z.number().int().optional(),
+  decisionFindingsSurfaced: z.number().int().optional(),
 });
 export type EngineMetrics = z.infer<typeof EngineMetrics>;
 
@@ -509,6 +596,8 @@ export const SessionState = z.object({
     })
     .nullable()
     .optional(),
+  /** Index of the last analysed turn; later turns are recorded but still waiting (live capture). */
+  analyzedThrough: z.number().int().optional(),
   /** Where the tiered analyzer's screen last read up to (segment index and meeting time). */
   screening: z
     .object({
@@ -518,6 +607,8 @@ export const SessionState = z.object({
     .optional(),
   /** Implementation previews for decisions discussed in this meeting. Absent in older sessions. */
   previews: z.array(ImplementationPreview).optional(),
+  /** Technical decisions made in this meeting and their evaluations. Absent in older sessions. */
+  decisions: z.array(TechnicalDecision).optional(),
   /** Slack messages seen this session, by reference (never their text). */
   slackRefs: z.array(SlackRef).optional(),
   /** The latest Slack search results that still count as context; `at` is meeting time. */
@@ -550,4 +641,5 @@ export type EngineEvent =
   | { type: 'slack_observed'; refIds: string[] }
   | { type: 'screened'; segments: number; flags: number }
   | { type: 'fact_disputed'; factId: string; fact: string; reason: string }
-  | { type: 'preview_updated'; preview: ImplementationPreview; note: string };
+  | { type: 'preview_updated'; preview: ImplementationPreview; note: string }
+  | { type: 'decision_updated'; decision: TechnicalDecision; note: string };

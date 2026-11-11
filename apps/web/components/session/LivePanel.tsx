@@ -7,6 +7,7 @@ import { SLACK_WINDOW_MS, type Discrepancy } from '@uc/core';
 import { CodeLink } from '@/components/CodeLink';
 import { SlackExcerpt } from '@/components/SlackLink';
 import { Avatar } from '@/components/ui/Avatar';
+import { DecisionLog, LiveDecisionCards, liveDecisionFindings } from '@/components/session/DecisionSection';
 import { PreviewSection } from '@/components/session/PreviewSection';
 import { SuggestionCard, type Act, type Respond } from '@/components/session/SuggestionCard';
 import { Transcript } from '@/components/session/Transcript';
@@ -26,6 +27,7 @@ export function LivePanel(props: { id: string; data: SessionResponse; connected:
   const live = state.discrepancies.filter((d) => d.visibility === 'live' && !['resolved', 'dismissed', 'unresolved'].includes(d.status));
   const queued = state.discrepancies.filter((d) => d.visibility === 'queued' && !['resolved', 'dismissed'].includes(d.status));
   const settled = state.discrepancies.filter((d) => d.surfacedAtSegmentIndex !== null && ['resolved', 'unresolved'].includes(d.status));
+  const liveCount = live.length + liveDecisionFindings(state).length;
   // Both follow the conversation: the latest substantial request, and the code it last touched.
   const request = latestRequest(state, segments);
   const lastAt = segments.at(-1)?.timestamp ?? 0;
@@ -71,25 +73,30 @@ export function LivePanel(props: { id: string; data: SessionResponse; connected:
       <section className="space-y-3" aria-live="polite" aria-label="Private suggestions">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold">
-            Suggestions{live.length > 0 && <span className="ml-1.5 rounded-full bg-[var(--color-accent)] px-1.5 py-px text-[11px] text-white">{live.length}</span>}
+            Suggestions{liveCount > 0 && <span className="ml-1.5 rounded-full bg-[var(--color-accent)] px-1.5 py-px text-[11px] text-white">{liveCount}</span>}
           </h2>
           <span className="flex items-center gap-1 text-[11px] text-[var(--color-muted)]">
             <Lock className="size-3" aria-hidden /> only you see these
           </span>
         </div>
-        {live.length === 0 ? (
+        {liveCount === 0 ? (
           <div className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--color-line)] px-4 py-5 text-sm text-[var(--color-muted)]">
             <Ear className="size-5 shrink-0" aria-hidden />
             <span>{ended ? 'The session has ended.' : 'Listening. Nothing needs your attention right now.'}</span>
           </div>
         ) : (
-          live.map((d) => card(d))
+          <>
+            {live.map((d) => card(d))}
+            <LiveDecisionCards sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={props.apply} />
+          </>
         )}
         {queued.length > 0 && <Collapsible label={`Saved for later (${queued.length})`}>{queued.map((d) => card(d))}</Collapsible>}
         {settled.length > 0 && <Collapsible label={`Settled (${settled.length})`}>{settled.map((d) => card(d, true, !ended))}</Collapsible>}
       </section>
 
       <PreviewSection sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={props.apply} />
+
+      <DecisionLog sessionId={id} state={state} segments={segments} ended={ended} htmlUrl={repo?.htmlUrl} apply={props.apply} />
 
       {(feature || request || focusEv || screen.length > 0) && (
         <section className="space-y-2.5 rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3" data-testid="now-discussing">

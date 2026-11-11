@@ -137,7 +137,7 @@ export class CaptureManager {
       return { accepted: true as const, partial: true };
     }
     info.partial = null;
-    const { events } = await this.services.run(sessionId, (engine) => engine.ingest(recallSegment(t, info.uploadId!, info.baseTimestampMs)));
+    const { events } = await this.services.record(sessionId, (engine) => engine.record(recallSegment(t, info.uploadId!, info.baseTimestampMs)));
     if (events.some((e) => e.type === 'duplicate_segment')) info.duplicates++;
     else info.segments++;
     this.services.notify(sessionId);
@@ -169,7 +169,7 @@ export class CaptureManager {
   async screen(sessionId: string, mentions: { identifiers: string[]; files: { path: string; line?: number }[] }) {
     const info = this.captures.get(sessionId);
     if (!info || info.status !== 'live') throw this.makeError(409, 'No capture is running for this session');
-    const { snapshot: { state } } = await this.services.run(sessionId, (engine) => engine.observeScreen(mentions));
+    const { snapshot: { state } } = await this.services.record(sessionId, (engine) => engine.observeScreen(mentions));
     const seen = state.screen ? state.screen.evidenceIds.flatMap((id) => state.evidence.find((e) => e.id === id) ?? []) : [];
     info.screen = { lastAt: new Date().toISOString(), matched: seen.map((e) => `${e.symbolName} (${e.filePath}:${e.startLine})`) };
     this.services.notify(sessionId);
@@ -222,7 +222,7 @@ export class CaptureManager {
           const t = turns.shift()!;
           if (!t.text) continue; // silence or a turn that never completed
           try {
-            const { events } = await this.services.run(sessionId, (engine) => engine.ingest({ speaker: t.speaker, text: t.text!, externalId: `mic:${t.itemId}` }));
+            const { events } = await this.services.record(sessionId, (engine) => engine.record({ speaker: t.speaker, text: t.text!, externalId: `mic:${t.itemId}` }));
             const seg = events.find((e) => e.type === 'segment_added');
             info.segments++;
             conn.send({ type: 'final', text: t.text, speaker: t.speaker, segmentId: seg?.type === 'segment_added' ? seg.segment.id : null });

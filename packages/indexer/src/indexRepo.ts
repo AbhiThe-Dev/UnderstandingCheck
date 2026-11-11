@@ -4,6 +4,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { extname, join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { CodeSymbol } from '@uc/core';
+import { extractDocSections, isDocFile } from './docs';
 import { extractSymbols, propagateEffects } from './extract';
 import { LANGUAGE_BY_EXTENSION } from './parser';
 
@@ -29,14 +30,15 @@ export interface SourceFile {
 }
 
 /**
- * Whether a repository path should be indexed: a supported TS/JS file outside dependency, build and
- * hidden directories (declaration files excluded). Used for local walks and for remote file trees.
+ * Whether a repository path should be indexed: a supported TS/JS file, or project documentation
+ * (Markdown), outside dependency, build and hidden directories (declaration files excluded). Used
+ * for local walks and for remote file trees.
  */
 export function shouldIndexPath(path: string): boolean {
   const parts = path.split('/');
   const file = parts.at(-1) ?? '';
   if (parts.slice(0, -1).some((d) => IGNORED_DIRS.has(d) || d.startsWith('.'))) return false;
-  return Boolean(LANGUAGE_BY_EXTENSION[extname(file)]) && !file.endsWith('.d.ts');
+  return (Boolean(LANGUAGE_BY_EXTENSION[extname(file)]) && !file.endsWith('.d.ts')) || isDocFile(path);
 }
 
 async function walk(root: string, dir = root, out: string[] = []): Promise<string[]> {
@@ -83,7 +85,8 @@ export async function indexFiles(files: SourceFile[], commitSha: string, onProgr
       skipped.push({ path: f.path, reason: 'file too large' });
     } else {
       try {
-        symbols.push(...(await extractSymbols({ filePath: f.path, source: f.source, language: LANGUAGE_BY_EXTENSION[extname(f.path)]!, commitSha })));
+        if (isDocFile(f.path)) symbols.push(...extractDocSections({ filePath: f.path, source: f.source, commitSha }));
+        else symbols.push(...(await extractSymbols({ filePath: f.path, source: f.source, language: LANGUAGE_BY_EXTENSION[extname(f.path)]!, commitSha })));
       } catch (err) {
         skipped.push({ path: f.path, reason: `parse error: ${(err as Error).message}` });
       }

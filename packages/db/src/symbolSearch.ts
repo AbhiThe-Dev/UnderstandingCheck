@@ -124,4 +124,21 @@ export class PgSymbolSearch implements SymbolSearch {
       .limit(limit);
     return rows.map(rowToSymbol);
   }
+
+  async callersOf(names: string[], limit: number): Promise<CodeSymbol[]> {
+    if (names.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(codeSymbols)
+      .where(
+        and(
+          this.scope(),
+          eq(codeSymbols.isTest, false),
+          or(...names.map((n) => sql`${codeSymbols.calls} @> ${JSON.stringify([n])}::jsonb`)),
+          sql`not (${inArray(codeSymbols.symbolName, names)})`,
+        ),
+      )
+      .limit(limit);
+    return rows.map(rowToSymbol);
+  }
 }

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import type { LlmProvider } from '@uc/core';
 import { GitHubAppHost, type RepoHost } from './github';
@@ -20,6 +21,7 @@ export function createLlmProviderFromEnv(env: NodeJS.ProcessEnv = process.env): 
 export {
   FakeRepoHost,
   GitHubAppHost,
+  PERSONAL_TOKEN_INSTALLATION,
   RepoAccessError,
   gitBlobSha,
   type GitHubAppOptions,
@@ -32,13 +34,26 @@ export {
 
 /**
  * GitHub App host from `GITHUB_APP_ID` plus `GITHUB_APP_PRIVATE_KEY_PATH` (preferred: a file only the
- * user can read) or `GITHUB_APP_PRIVATE_KEY`. Returns null when not configured.
+ * user can read) or `GITHUB_APP_PRIVATE_KEY`. Returns null when not configured. Optionally adds a
+ * personal token for repositories the app isn't installed on: `GITHUB_TOKEN`, or `GITHUB_GH_USER` to
+ * read that account's token from the GitHub CLI at startup, so it never has to be written to `.env`.
  */
 export function createRepoHostFromEnv(env: NodeJS.ProcessEnv = process.env): RepoHost | null {
   if (!env.GITHUB_APP_ID) return null;
   const privateKey = env.GITHUB_APP_PRIVATE_KEY_PATH ? readFileSync(env.GITHUB_APP_PRIVATE_KEY_PATH, 'utf8') : env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, '\n');
   if (!privateKey) return null;
-  return new GitHubAppHost({ appId: env.GITHUB_APP_ID, privateKey });
+  return new GitHubAppHost({ appId: env.GITHUB_APP_ID, privateKey, userToken: personalGitHubToken(env) });
+}
+
+function personalGitHubToken(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.GITHUB_TOKEN) return env.GITHUB_TOKEN;
+  if (!env.GITHUB_GH_USER) return undefined;
+  try {
+    return execFileSync('gh', ['auth', 'token', '--hostname', 'github.com', '--user', env.GITHUB_GH_USER], { encoding: 'utf8', timeout: 10_000 }).trim() || undefined;
+  } catch (err) {
+    console.warn(`GITHUB_GH_USER=${env.GITHUB_GH_USER}: could not read its token from the GitHub CLI (${(err as Error).message.split('\n')[0]})`);
+    return undefined;
+  }
 }
 export {
   FakeSlack,

@@ -26,6 +26,11 @@ export class RetrievalCache {
   }
 }
 
+/** Project documentation is indexed as Markdown sections next to the code. */
+export function isDocPath(path: string): boolean {
+  return /\.mdx?$/i.test(path);
+}
+
 export function toEvidence(sym: CodeSymbol, reason: string): Omit<CodeEvidence, 'id'> {
   return {
     symbolId: sym.id,
@@ -50,11 +55,13 @@ export function toEvidence(sym: CodeSymbol, reason: string): Omit<CodeEvidence, 
 export async function retrieveContext(
   query: { terms: string[]; words: string[] },
   search: SymbolSearch,
-  cfg: EngineConfig['retrieval'],
+  /** `docs: 'only'` searches project documentation instead of code (decision evaluation); code is the default. */
+  cfg: EngineConfig['retrieval'] & { docs?: 'exclude' | 'only' },
   cache?: RetrievalCache,
 ): Promise<RetrievalResult> {
+  const docs = cfg.docs === 'only';
   // The budget is part of the key: a preview reads more code for the same terms than a single turn does.
-  const key = `${search.commitSha}:${cfg.maxSymbols}/${cfg.contextBudgetTokens}/${cfg.maxTestsPerSymbol}:${[...query.terms].sort().join(',')}`;
+  const key = `${search.commitSha}:${docs ? 'docs:' : ''}${cfg.maxSymbols}/${cfg.contextBudgetTokens}/${cfg.maxTestsPerSymbol}:${[...query.terms].sort().join(',')}`;
   const cached = cache?.get(key);
   if (cached) return { ...cached, cacheHit: true };
 
@@ -76,8 +83,9 @@ export async function retrieveContext(
     return { evidence: [], sufficient: false, steps: ['no content terms'], cacheHit: false };
   }
 
-  const hits = (await search.lexical(query, cfg.maxSymbols * 2)).filter(
-    (h) => h.score >= cfg.minScore && (h.nameMatch || h.matchedTerms.length >= 2) && !h.symbol.isTest,
+  // Documentation sections never stand in for code (and the reverse), so the turn pipeline is unaffected by docs.
+  const hits = (await search.lexical(query, cfg.maxSymbols * (docs ? 4 : 2))).filter(
+    (h) => h.score >= cfg.minScore && (h.nameMatch || h.matchedTerms.length >= 2) && !h.symbol.isTest && (h.symbol.symbolType === 'doc') === docs,
   );
   steps.push(`lexical: ${hits.length} hits ≥ ${cfg.minScore}`);
   if (hits.length === 0) {
@@ -89,7 +97,12 @@ export async function retrieveContext(
   // Keep only hits close to the best one so a weak match does not crowd the budget.
   const best = hits[0]!.score;
   const primary = hits.filter((h) => h.score >= best * 0.5).slice(0, 3);
-  for (const h of primary) push(h.symbol, `matches ${h.matchedTerms.join(', ')}`);
+  for (const h of primary) push(h.symbol, `${docs ? 'documentation ' : ''}matches ${h.matchedTerms.join(', ')}`);
+  if (docs) {
+    const result = { evidence: out, sufficient: out.length > 0, steps, cacheHit: false };
+    cache?.set(key, result);
+    return result;
+  }
 
   // Associated tests document intended behavior; they get a slot before callees can fill the budget.
   for (const h of primary.slice(0, 2)) {
@@ -100,7 +113,7 @@ export async function retrieveContext(
   // One hop along direct calls from the primary symbols, consequential callees first.
   const callees = [...new Set(primary.flatMap((h) => h.symbol.calls))];
   if (callees.length) {
-    const called = (await search.byNames(callees)).sort((a, b) => b.effects.length - a.effects.length);
+    const called = (await search.byNames(callees)).filter((s) => s.symbolType !== 'doc').sort((a, b) => b.effects.length - a.effects.length);
     steps.push(`calls: ${called.length} callees resolved`);
     for (const sym of called) {
       const caller = primary.find((h) => h.symbol.calls.includes(sym.symbolName));

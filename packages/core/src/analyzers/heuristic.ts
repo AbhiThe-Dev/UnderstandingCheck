@@ -132,7 +132,8 @@ export class HeuristicAnalyzer implements Analyzer {
       if (otherStance === 'neutral' || otherStance === claimStance) continue;
       if (!other.kinds.some((k) => k === 'requirement' || k === 'proposal' || k === 'disagreement')) continue;
       const overlap = claim.terms.filter((t) => other.terms.includes(t) && !tracked.has(t));
-      if (overlap.length === 0) continue;
+      // Slack search returns messages from any topic: one shared word with them ("github") is chance, not a conflict.
+      if (overlap.length < (other.participantId.startsWith('prior:slack:') ? 2 : 1)) continue;
 
       const positive = claimStance === 'positive' ? claim : other;
       const negative = claimStance === 'positive' ? other : claim;

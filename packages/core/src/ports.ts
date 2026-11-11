@@ -15,6 +15,8 @@ import type {
   Position,
   PreviewContent,
   PreviewUsage,
+  QualityDimension,
+  TechnicalDecision,
   Segment,
   SessionState,
   SlackRef,
@@ -38,6 +40,8 @@ export interface SymbolSearch {
   inFiles?(paths: string[], limit: number): Promise<CodeSymbol[]>;
   /** Test symbols that reference `symbolName`. */
   testsFor(symbolName: string, limit: number): Promise<CodeSymbol[]>;
+  /** Non-test symbols that call any of `names` (who depends on code a decision would change). */
+  callersOf?(names: string[], limit: number): Promise<CodeSymbol[]>;
 }
 
 // ---------- LLM provider (implemented by @uc/providers) ----------
@@ -101,6 +105,9 @@ export class PreviewError extends Error {
     super(message);
   }
 }
+
+/** A decision evaluation produced no usable answer; `usage` is what it cost anyway. */
+export class DecisionError extends PreviewError {}
 
 // ---------- Usage / cost ----------
 
@@ -179,6 +186,8 @@ export interface CandidateInput {
   facts?: FactSheet;
   /** Called when the model disputes a fact; the engine logs it so the rules can be improved. */
   reportDispute?: (d: { factId: string; fact: string; reason: string }) => void;
+  /** Called when the model says an already tracked concern is answered by the conversation (or was never real). */
+  reportSettled?: (s: { key: string; reason: string }) => void;
 }
 
 /** A stretch of conversation for the tiered analyzer's cheap screen. */
@@ -261,6 +270,46 @@ export interface PreviewResult {
   usage: PreviewUsage;
 }
 
+/** What a decision evaluation reads. Bounded by the engine like a preview. */
+export interface DecisionInput {
+  state: SessionState;
+  decision: Pick<TechnicalDecision, 'id' | 'topics' | 'dimensions' | 'segmentIds'>;
+  /** Turns of the discussion, oldest first (the decision's own turns plus a little context). */
+  discussion: Segment[];
+  /** Code (implementations, callers, tests) and documentation sections (`symbolType` doc paths, isTest false). */
+  evidence: CodeEvidence[];
+  slack: SlackContextItem[];
+  /** Findings code already established for free; the model should not repeat them. */
+  ruleFindings: RawDecisionFinding[];
+}
+
+/** A finding as an analyzer writes it, before validation. */
+export interface RawDecisionFinding {
+  kind: 'risk' | 'overlooked_dependency' | 'better_alternative';
+  dimension: QualityDimension;
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  impact: string;
+  refs: RawCodeRef[];
+  slackRefs: { refId: string; note: string }[];
+  alternative: string | null;
+  ask: string | null;
+  confidence: number;
+}
+
+export interface RawDecisionEvaluation {
+  /** False when the turns turn out not to be a technical decision (then findings are ignored). */
+  isDecision: boolean;
+  decision: string;
+  findings: RawDecisionFinding[];
+  verdict: string | null;
+}
+
+export interface DecisionResult {
+  raw: RawDecisionEvaluation;
+  usage: PreviewUsage;
+}
+
 export interface ClarificationDraft {
   format: ClarificationFormat;
   question: string;
@@ -305,4 +354,10 @@ export interface Analyzer {
    * or requested, never per turn. Throws when no usable answer was produced.
    */
   previewImplementation?(input: PreviewInput): Promise<PreviewResult>;
+  /**
+   * Consequences of an adopted technical decision (performance, scalability, reliability, security,
+   * maintainability, compatibility). Called at most once per decision, outside the turn path. Throws
+   * `DecisionError` when no usable answer was produced. Without it, decisions get rule findings only.
+   */
+  evaluateDecision?(input: DecisionInput): Promise<DecisionResult>;
 }

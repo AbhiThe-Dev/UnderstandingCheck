@@ -9,7 +9,9 @@ import {
   pricesFrom,
   promptOptionsFrom,
   type Analyzer,
+  type DecisionJob,
   type EngineEvent,
+  type FindingAction,
   type LlmProvider,
   type PreviewJob,
   type PriorDecision,
@@ -301,15 +303,90 @@ export class Services {
     return 'all';
   }
 
+  private restoring = new Map<string, Promise<SessionEngine>>();
+
   private async engineFor(id: string): Promise<{ engine: SessionEngine; row: SessionRow }> {
     const row = await this.store.getSession(id);
     if (!row) throw new HttpError(404, 'Session not found');
     let engine = this.engines.get(id);
     if (!engine) {
-      engine = SessionEngine.restore(row.state as SessionState, await this.store.loadSegments(id), await this.depsFor(row));
-      this.engines.set(id, engine);
+      // The record lane and the analysis lane can both ask at once; restore only one engine.
+      let pending = this.restoring.get(id);
+      if (!pending) {
+        pending = (async () => SessionEngine.restore(row.state as SessionState, await this.store.loadSegments(id), await this.depsFor(row)))();
+        this.restoring.set(id, pending);
+      }
+      try {
+        engine = await pending;
+      } finally {
+        this.restoring.delete(id);
+      }
+      if (!this.engines.has(id)) this.engines.set(id, engine);
+      engine = this.engines.get(id)!;
     }
     return { engine, row };
+  }
+
+  private saves = new Map<string, Promise<unknown>>();
+
+  /** Persist a session's state, one save at a time per session (both lanes save). */
+  private save(id: string, engine: SessionEngine, opts: { ended?: boolean } = {}) {
+    const next = (this.saves.get(id) ?? Promise.resolve()).catch(() => undefined).then(() => this.store.saveSessionState(id, engine.state, engine.segments, opts));
+    this.saves.set(id, next);
+    return next;
+  }
+
+  private recordQueues = new Map<string, Promise<unknown>>();
+
+  /**
+   * Live capture's fast lane: store a turn (or a screen observation) and show it right away, then
+   * analyse in the background. It does not wait behind model calls, so the transcript stays live.
+   */
+  async record(id: string, op: (engine: SessionEngine, row: SessionRow) => EngineEvent[] | Promise<EngineEvent[]>) {
+    const next = (this.recordQueues.get(id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        const { engine, row } = await this.engineFor(id);
+        if (row.status === 'ended') throw new HttpError(409, 'Session has ended');
+        const events = await op(engine, row);
+        await this.save(id, engine);
+        const snapshot: SessionSnapshot = { state: engine.state, segments: engine.segments, status: row.status };
+        for (const l of this.listeners.get(id) ?? []) l(snapshot, events);
+        if (events.some((e) => e.type === 'segment_added')) {
+          this.slackContext?.onRun(row, events, engine.state);
+          this.scheduleAnalysis(id);
+          if (engine.screenDue()) this.scheduleScreen(id);
+        }
+        return { events, snapshot };
+      });
+    this.recordQueues.set(id, next);
+    return next;
+  }
+
+  /** Per session: whether the analysis loop is running, and whether more turns arrived meanwhile. */
+  private analysing = new Map<string, { again: boolean }>();
+
+  /** Analyse recorded turns in the background; the engine skips the model for turns it fell behind on. */
+  private scheduleAnalysis(id: string) {
+    const running = this.analysing.get(id);
+    if (running) {
+      running.again = true;
+      return;
+    }
+    const flag = { again: false };
+    this.analysing.set(id, flag);
+    void (async () => {
+      try {
+        do {
+          flag.again = false;
+          await this.run(id, (engine) => engine.analyzePending());
+        } while (flag.again || (this.engines.get(id)?.pendingTurns ?? 0) > 0);
+      } catch (err) {
+        if (!(err instanceof HttpError)) console.error(`[api] analysis failed for ${id}: ${(err as Error).message}`);
+      } finally {
+        this.analysing.delete(id);
+      }
+    })();
   }
 
   /**
@@ -322,11 +399,12 @@ export class Services {
       const { engine, row } = await this.engineFor(id);
       if (row.status === 'ended' && !opts.ended && !opts.afterEnd) throw new HttpError(409, 'Session has ended');
       const events = await op(engine, row);
-      await this.store.saveSessionState(id, engine.state, engine.segments, { ended: opts.ended });
+      await this.save(id, engine, { ended: opts.ended });
       const snapshot: SessionSnapshot = { state: engine.state, segments: engine.segments, status: opts.ended ? 'ended' : row.status };
       for (const l of this.listeners.get(id) ?? []) l(snapshot, events);
       if (!opts.ended) this.slackContext?.onRun(row, events, engine.state);
       if (!opts.ended && events.some((e) => e.type === 'segment_added') && engine.screenDue()) this.scheduleScreen(id);
+      if (engine.decisionsDue().length > 0) this.scheduleDecisions(id);
       return { events, snapshot };
     });
     this.queues.set(id, next);
@@ -347,6 +425,85 @@ export class Services {
         if (!(err instanceof HttpError)) console.error(`[api] screen failed for ${id}: ${(err as Error).message}`);
       })
       .finally(() => this.screening.delete(id));
+  }
+
+  /** Per session: the running decision-evaluation loop, and whether more decisions became due meanwhile. */
+  private deciding = new Map<string, { again: boolean; done: Promise<void> }>();
+
+  /**
+   * Evaluate adopted technical decisions in the background, one at a time per session: gathering
+   * context and the cache check run in the session's queue, the model call outside it (so the meeting
+   * keeps being analysed), and validation back in the queue. Decisions are rare (a few per meeting) and
+   * each gets at most one call, so a single loop per session is enough.
+   */
+  private scheduleDecisions(id: string) {
+    const running = this.deciding.get(id);
+    if (running) {
+      running.again = true;
+      return;
+    }
+    const flag = { again: false, done: Promise.resolve() };
+    flag.done = (async () => {
+      try {
+        do {
+          flag.again = false;
+          for (;;) {
+            let job: DecisionJob | null = null;
+            const { snapshot } = await this.run(
+              id,
+              async (engine) => {
+                const next = engine.decisionsDue()[0];
+                if (!next) return [];
+                const r = await engine.beginDecision(next.id);
+                job = r.job;
+                return r.events;
+              },
+              { afterEnd: true },
+            );
+            const pending = job as DecisionJob | null;
+            if (pending) {
+              const { engine } = await this.engineFor(id);
+              const outcome = await engine.analyzeDecision(pending);
+              await this.run(id, async (e) => e.finishDecision(pending, outcome), { afterEnd: true });
+            } else if (!(snapshot.state.decisions ?? []).some((d) => d.status === 'adopted')) {
+              break;
+            }
+          }
+        } while (flag.again);
+      } catch (err) {
+        if (!(err instanceof HttpError)) console.error(`[api] decision evaluation failed for ${id}: ${(err as Error).message}`);
+      } finally {
+        this.deciding.delete(id);
+      }
+    })();
+    this.deciding.set(id, flag);
+  }
+
+  /** Resolves when no decision evaluation is running for the session (end of meeting, tests). */
+  async decisionsSettled(id: string) {
+    for (let r = this.deciding.get(id); r; r = this.deciding.get(id)) await r.done;
+  }
+
+  /** Re-evaluate a decision on request (after the discussion moved on, or one that was skipped or failed). */
+  async requestDecisionEvaluation(id: string, decisionId: string) {
+    return this.run(id, async (engine) => this.engineCall(() => engine.requestDecisionEvaluation(decisionId)));
+  }
+
+  async dismissDecision(id: string, decisionId: string) {
+    return this.run(id, async (engine) => this.engineCall(() => engine.dismissDecision(decisionId)));
+  }
+
+  async actOnFinding(id: string, decisionId: string, findingId: string, action: FindingAction) {
+    return this.run(id, async (engine) => this.engineCall(() => engine.actOnFinding(decisionId, findingId, action)));
+  }
+
+  /** Engine lookups throw plain errors; unknown ids are a 404, anything else the request's fault. */
+  private engineCall(fn: () => EngineEvent[]): EngineEvent[] {
+    try {
+      return fn();
+    } catch (err) {
+      throw new HttpError(/^Unknown /.test((err as Error).message) ? 404 : 422, (err as Error).message);
+    }
   }
 
   /** Preview analyses in flight, by `${sessionId}:${previewId}`. */
@@ -404,10 +561,15 @@ export class Services {
     });
   }
 
-  /** End a meeting: screen whatever the last timer did not cover, then finalize. */
+  /** End a meeting: analyse turns still waiting, screen whatever the last timer did not cover, then finalize. */
   async endSession(id: string) {
+    // Ending twice is a harmless repeat: only a live meeting has turns left to analyse.
+    if ((await this.snapshot(id)).status !== 'ended') await this.run(id, (engine) => engine.analyzePending());
     if (this.analyzerMode === 'tiered') await this.run(id, (engine) => engine.screenIfDue({ force: true }));
-    return this.run(id, (engine) => engine.finalize(), { ended: true });
+    const result = await this.run(id, (engine) => engine.finalize(), { ended: true });
+    // Proposals still open at the end count as decided; their evaluations land in the summary.
+    await this.decisionsSettled(id);
+    return { ...result, snapshot: (await this.snapshot(id)) as SessionSnapshot };
   }
 
   /** Text of Slack messages the session's engine holds in memory, for the live panel. Never read from the database. */

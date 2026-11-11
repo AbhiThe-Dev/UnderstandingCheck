@@ -8,7 +8,9 @@ const STOPWORDS = new Set(
   what which who whom whose when where why how up down out over under again further once more most less
   get got gets make makes made go goes going went thing things stuff way like well right now think know
   want need needs let lets i'll we'll i'm it's that's don't doesn't didn't won't can't shouldn't wouldn't
-  isn't aren't wasn't weren't let's gonna wanna kind sort bit lot actually basically probably maybe`
+  isn't aren't wasn't weren't let's gonna wanna kind sort bit lot actually basically probably maybe
+  mean means meant because cause guess said say says saying tell told look looks see seen still even though
+  something anything everything nothing someone anyone everyone whatever whenever already pretty quite`
     .split(/\s+/)
     .filter(Boolean),
 );

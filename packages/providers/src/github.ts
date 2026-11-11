@@ -63,7 +63,16 @@ export interface GitHubAppOptions {
   /** Base for git clone URLs; tests point this at a local directory. */
   gitBaseUrl?: string;
   fetch?: typeof fetch;
+  /**
+   * A personal token (for example from `gh auth token`) for repositories the app isn't installed on,
+   * such as an organization whose owners haven't approved the app. It can't be narrowed to one
+   * repository or to read-only, so it is used only for the same read requests as installation tokens.
+   */
+  userToken?: string;
 }
+
+/** Installation id of repositories reached through `userToken` rather than an app installation. */
+export const PERSONAL_TOKEN_INSTALLATION = 0;
 
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
 
@@ -115,6 +124,11 @@ export class GitHubAppHost implements RepoHost {
 
   /** Installation token scoped to one repository with read-only permissions. */
   private async token(ref: RepoRef, permissions: Record<string, 'read'> = { contents: 'read', metadata: 'read' }): Promise<string> {
+    if (ref.installationId === PERSONAL_TOKEN_INSTALLATION) {
+      // Not a RepoAccessError: a token missing from this run's config shouldn't delete the cached index.
+      if (!this.opts.userToken) throw new Error('This repository was connected with a personal GitHub token, which is not configured (GITHUB_TOKEN or GITHUB_GH_USER)');
+      return this.opts.userToken;
+    }
     const key = `${ref.installationId}:${ref.owner}/${ref.name}:${Object.keys(permissions).sort().join(',')}`;
     const cached = this.tokens.get(key);
     if (cached && cached.expiresAt - TOKEN_REFRESH_MARGIN_MS > Date.now()) return cached.token;
@@ -144,6 +158,14 @@ export class GitHubAppHost implements RepoHost {
         const res = await this.request<{ repositories: GhRepo[] }>(`/installation/repositories?per_page=100&page=${page}`, token);
         out.push(...res.repositories.map((r) => toHostRepo(inst.id, r)));
         if (res.repositories.length < 100) break;
+      }
+    }
+    if (this.opts.userToken) {
+      const seen = new Set(out.map((r) => r.id));
+      for (let page = 1; page < 20; page++) {
+        const repos = await this.request<GhRepo[]>(`/user/repos?per_page=100&page=${page}&sort=pushed`, this.opts.userToken);
+        out.push(...repos.filter((r) => !seen.has(r.id)).map((r) => toHostRepo(PERSONAL_TOKEN_INSTALLATION, r)));
+        if (repos.length < 100) break;
       }
     }
     return out;

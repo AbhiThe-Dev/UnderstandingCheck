@@ -38,6 +38,8 @@ export interface EngineConfig {
     minScore: number;
     maxTestsPerSymbol: number;
   };
+  /** Live capture: the model analyses a turn only if fewer than `fullTurns` newer turns are waiting; older ones get rules. */
+  liveAnalysis: { fullTurns: number };
   /** Tiered analyzer: when the small-model screen reads the latest turns. */
   screening: {
     /** Meeting time between screens. */
@@ -65,6 +67,32 @@ export interface EngineConfig {
     /** Meaningful turns right after a decision's last turn that count as its follow-up even without shared terms. */
     followUpTurns: number;
   };
+  /**
+   * Technical decision evaluation: detection is free (rules, every turn); each adopted decision gets at
+   * most one bounded model call, and only what validation keeps and the policy below allows is shown.
+   */
+  decisions: {
+    /** Detector score (0–1) at which a turn counts as a proposed technical decision. */
+    detectThreshold: number;
+    /** A proposal nobody objects to for this many turns counts as adopted (agreement adopts it at once). */
+    adoptAfterTurns: number;
+    /** Model evaluations per meeting (re-evaluations included); later decisions get rule findings only. */
+    maxEvaluationsPerSession: number;
+    /** Findings shown live per meeting; the rest are noted for the decision log. */
+    maxLivePerSession: number;
+    /** Below this a finding is dropped; medium-severity findings need `liveConfidence` to be shown live. */
+    minConfidence: number;
+    liveConfidence: number;
+    /** What the evaluation reads: code, its callers and tests, documentation, conversation. */
+    maxSymbols: number;
+    contextBudgetTokens: number;
+    maxTestsPerSymbol: number;
+    maxCallers: number;
+    maxDocSections: number;
+    docsBudgetTokens: number;
+    maxDiscussionTurns: number;
+    maxDiscussionChars: number;
+  };
   /** How many recent segments count as "right after" a proposal, for agreement detection. */
   agreementWindow: number;
   recentWindow: number;
@@ -82,7 +110,7 @@ export interface EngineConfig {
   };
 }
 
-export type LlmOperation = 'extraction' | 'candidates' | 'screen' | 'clarification' | 'response' | 'preview';
+export type LlmOperation = 'extraction' | 'candidates' | 'screen' | 'clarification' | 'response' | 'preview' | 'decision';
 
 export const DEFAULT_CONFIG: EngineConfig = {
   scoring: {
@@ -108,6 +136,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   },
   rateLimit: { maxLivePerSession: 6, maxOpenLive: 3 },
   retrieval: { maxSymbols: 6, contextBudgetTokens: 2500, slackBudgetTokens: 800, minScore: 1.2, maxTestsPerSymbol: 1 },
+  liveAnalysis: { fullTurns: 2 },
   preview: {
     hintThreshold: 0.6,
     maxSymbols: 8,
@@ -118,6 +147,22 @@ export const DEFAULT_CONFIG: EngineConfig = {
     minOverlap: 0.4,
     followUpTurns: 3,
   },
+  decisions: {
+    detectThreshold: 0.55,
+    adoptAfterTurns: 2,
+    maxEvaluationsPerSession: 8,
+    maxLivePerSession: 3,
+    minConfidence: 0.6,
+    liveConfidence: 0.8,
+    maxSymbols: 8,
+    contextBudgetTokens: 3500,
+    maxTestsPerSymbol: 1,
+    maxCallers: 4,
+    maxDocSections: 3,
+    docsBudgetTokens: 900,
+    maxDiscussionTurns: 12,
+    maxDiscussionChars: 5000,
+  },
   screening: { intervalMs: 60_000, maxTurns: 8, overlap: 3, maxFlags: 2 },
   agreementWindow: 3,
   recentWindow: 12,
@@ -125,11 +170,12 @@ export const DEFAULT_CONFIG: EngineConfig = {
   llm: {
     // Candidates were cut off at 2000 (15% of answers in a live run): hidden reasoning uses ~1000 of it.
     // A preview writes several short sections; it is requested by a person, so it runs at most a few times per meeting.
-    maxOutputTokens: { extraction: 400, candidates: 4000, screen: 600, clarification: 800, response: 300, preview: 3500 },
+    // A decision evaluation is usually an empty list; the cap leaves room for hidden reasoning and up to three findings.
+    maxOutputTokens: { extraction: 400, candidates: 4000, screen: 600, clarification: 800, response: 300, preview: 3500, decision: 2000 },
     factSheetOutputTokens: 5000,
     maxInputChars: 24_000,
     // Spotting a conflict in cited code needs little reasoning; screening and classifying need almost none.
-    effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal', preview: 'low' },
+    effort: { extraction: 'minimal', candidates: 'low', screen: 'minimal', clarification: 'low', response: 'minimal', preview: 'low', decision: 'low' },
   },
 };
 
@@ -231,15 +277,21 @@ export function estimateCostUsd(
 }
 
 /**
- * Fact-sheet prompt and model tiers from `UC_PROMPT_STYLE` (raw | facts), `UC_CANDIDATES_TIER` and
- * `UC_PREVIEW_TIER` (cheap | reasoning).
+ * Fact-sheet prompt and model tiers from `UC_PROMPT_STYLE` (raw | facts), `UC_CANDIDATES_TIER`,
+ * `UC_PREVIEW_TIER` and `UC_DECISION_TIER` (cheap | reasoning).
  */
-export function promptOptionsFrom(env: Record<string, string | undefined>): { promptStyle: 'raw' | 'facts'; candidatesTier?: 'cheap' | 'reasoning'; previewTier?: 'cheap' | 'reasoning' } {
+export function promptOptionsFrom(env: Record<string, string | undefined>): {
+  promptStyle: 'raw' | 'facts';
+  candidatesTier?: 'cheap' | 'reasoning';
+  previewTier?: 'cheap' | 'reasoning';
+  decisionTier?: 'cheap' | 'reasoning';
+} {
   const tier = (v: string | undefined) => (v === 'cheap' || v === 'reasoning' ? v : undefined);
   return {
     promptStyle: env.UC_PROMPT_STYLE === 'facts' ? 'facts' : 'raw',
     ...(tier(env.UC_CANDIDATES_TIER) ? { candidatesTier: tier(env.UC_CANDIDATES_TIER) } : {}),
     ...(tier(env.UC_PREVIEW_TIER) ? { previewTier: tier(env.UC_PREVIEW_TIER) } : {}),
+    ...(tier(env.UC_DECISION_TIER) ? { decisionTier: tier(env.UC_DECISION_TIER) } : {}),
   };
 }
 

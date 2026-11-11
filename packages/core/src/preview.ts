@@ -147,6 +147,48 @@ export interface PreviewValidation {
 }
 
 /**
+ * Citations an analyzer wrote, checked against the evidence it was shown: the evidence id must exist,
+ * be at the session's commit, and the lines must lie inside that symbol. Invalid ones are recorded in
+ * `removed` (reason invalid_reference) and dropped; valid ones are de-duplicated.
+ */
+export function checkCodeRefs(list: RawCodeRef[], evidence: CodeEvidence[], commitSha: string, where: string, removed: { reason: string; detail: string }[]): { valid: CodeRef[]; invalid: number } {
+  const valid: CodeRef[] = [];
+  let invalid = 0;
+  for (const r of list) {
+    const ev = evidence.find((e) => e.id === r.evidenceId);
+    const problem = !ev
+      ? `${r.evidenceId} was not part of the code shown`
+      : ev.commitSha !== commitSha
+        ? `${ev.filePath} is from another commit`
+        : !Number.isInteger(r.startLine) || !Number.isInteger(r.endLine) || r.startLine > r.endLine
+          ? `invalid lines ${r.startLine}-${r.endLine}`
+          : r.startLine < ev.startLine || r.endLine > ev.endLine
+            ? `${ev.filePath}:${r.startLine}-${r.endLine} is outside ${ev.symbolName} (${ev.startLine}-${ev.endLine})`
+            : null;
+    if (problem || !ev) {
+      invalid++;
+      removed.push({ reason: 'invalid_reference', detail: `${where}: ${problem}` });
+      continue;
+    }
+    if (!valid.some((x) => x.evidenceId === ev.id && x.startLine === r.startLine)) {
+      valid.push({ evidenceId: ev.id, filePath: ev.filePath, startLine: r.startLine, endLine: r.endLine, commitSha: ev.commitSha, symbolName: ev.symbolName, note: truncate(r.note ?? '', 200) });
+    }
+  }
+  return { valid, invalid };
+}
+
+/** Slack citations checked against the messages the analyzer was shown (by reference; never their text). */
+export function checkSlackRefs(list: { refId: string; note: string }[], slack: SlackContextItem[], removed: { reason: string; detail: string }[]): SlackCitation[] {
+  const out: SlackCitation[] = [];
+  for (const r of list) {
+    const item = slack.find((s) => s.ref.id === r.refId);
+    if (!item) removed.push({ reason: 'unknown_slack_message', detail: `${r.refId} was not in this Slack context` });
+    else if (!out.some((x) => x.id === item.ref.id)) out.push({ ...item.ref, note: truncate(r.note, 200) });
+  }
+  return out;
+}
+
+/**
  * Hard gate between any analyzer and the user, like `validateCandidate` for concerns:
  * - a statement about current behavior survives only with a citation into code the analysis was shown,
  *   at the session's commit, with lines inside that symbol;
@@ -161,31 +203,7 @@ export function validatePreview(
   ctx: { evidence: CodeEvidence[]; segments: Map<string, Segment>; commitSha: string; slack: SlackContextItem[]; requirements: Requirement[] },
 ): PreviewValidation {
   const removed: PreviewValidation['removed'] = [];
-  const refs = (list: RawCodeRef[], where: string): { valid: CodeRef[]; invalid: number } => {
-    const valid: CodeRef[] = [];
-    let invalid = 0;
-    for (const r of list) {
-      const ev = ctx.evidence.find((e) => e.id === r.evidenceId);
-      const problem = !ev
-        ? `${r.evidenceId} was not part of the code shown`
-        : ev.commitSha !== ctx.commitSha
-          ? `${ev.filePath} is from another commit`
-          : !Number.isInteger(r.startLine) || !Number.isInteger(r.endLine) || r.startLine > r.endLine
-            ? `invalid lines ${r.startLine}-${r.endLine}`
-            : r.startLine < ev.startLine || r.endLine > ev.endLine
-              ? `${ev.filePath}:${r.startLine}-${r.endLine} is outside ${ev.symbolName} (${ev.startLine}-${ev.endLine})`
-              : null;
-      if (problem || !ev) {
-        invalid++;
-        removed.push({ reason: 'invalid_reference', detail: `${where}: ${problem}` });
-        continue;
-      }
-      if (!valid.some((x) => x.evidenceId === ev.id && x.startLine === r.startLine)) {
-        valid.push({ evidenceId: ev.id, filePath: ev.filePath, startLine: r.startLine, endLine: r.endLine, commitSha: ev.commitSha, symbolName: ev.symbolName, note: truncate(r.note ?? '', 200) });
-      }
-    }
-    return { valid, invalid };
-  };
+  const refs = (list: RawCodeRef[], where: string) => checkCodeRefs(list, ctx.evidence, ctx.commitSha, where, removed);
   const quote = (q: { segmentId: string; quote: string } | null): Quote | null => {
     if (!q) return null;
     const seg = ctx.segments.get(q.segmentId);
@@ -193,12 +211,7 @@ export function validatePreview(
     return { segmentId: seg.id, participantId: seg.participantId, quote: truncate(q.quote, 300) };
   };
 
-  const slackRefs: SlackCitation[] = [];
-  for (const r of raw.slackRefs) {
-    const item = ctx.slack.find((s) => s.ref.id === r.refId);
-    if (!item) removed.push({ reason: 'unknown_slack_message', detail: `${r.refId} was not in this Slack context` });
-    else if (!slackRefs.some((x) => x.id === item.ref.id)) slackRefs.push({ ...item.ref, note: truncate(r.note, 200) });
-  }
+  const slackRefs = checkSlackRefs(raw.slackRefs, ctx.slack, removed);
 
   const proposedChange = truncate(raw.proposedChange.trim(), 300);
   const summary = truncate(raw.summary.trim(), 400);
